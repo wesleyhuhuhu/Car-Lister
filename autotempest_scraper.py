@@ -5,9 +5,9 @@ AutoTempest renders its results with client-side JS, so we use Playwright
 rather than plain requests. Search params map directly to AutoTempest's
 query string, e.g.:
 
-    https://www.autotempest.com/results?make=toyota&model=camry&zip=90001&rad=50&minprice=10000&maxprice=25000
+    https://www.autotempest.com/results?make=toyota&model=camry&radius=50&zip=90001&minprice=10000&maxprice=25000
 
-Common params: make, model, zip, rad (radius, miles), minprice, maxprice,
+Common params: make, model, zip, radius (miles), minprice, maxprice,
 minyear, maxyear, minmiles, maxmiles.
 
 The page loads each source (Carvana, Cars.com, eBay, CarSoup, Hemmings,
@@ -49,6 +49,46 @@ SELECTORS = {
 # VIN is embedded in the Share button's onclick, e.g.:
 #   window.AT.shareListing(`cs`, `4T1KZ1AK8LU045992`, `Toyota`, `camry`)
 VIN_FROM_ONCLICK_RE = re.compile(r"shareListing\(`[^`]*`,\s*`([A-Z0-9]{11,17})`")
+
+
+# Human-readable names for AutoTempest's internal source codes
+# (data-backend-sitecode attribute on each result card).
+SITE_NAMES = {
+    "te": "AutoTempest",
+    "hem": "Hemmings",
+    "hemc": "Hemmings",
+    "cs": "CarSoup",
+    "cv": "Carvana",
+    "cm": "Cars.com",
+    "cmf": "Cars.com",
+    "cmp": "Cars.com",
+    "eb": "eBay",
+    "ebcom": "eBay",
+    "ot": "Other",
+    "at": "AutoTrader.com",
+    "ct": "AutoTrader.ca",
+    "cg": "CarGurus",
+    "cgu": "CarGurus",
+    "cgc": "CarGurus.ca",
+    "kj": "Kijiji.ca",
+    "st": "craigslist",
+    "fbm": "Facebook Marketplace",
+    "abt": "AutoByTel",
+    "abtc": "AutoByTel",
+    "tc": "TrueCar",
+    "vast": "VAST",
+    "vastc": "VAST",
+    "dt": "DealerTrack",
+    "cd": "CarsDirect",
+    "pa": "AutoTempest (Private)",
+    "ag": "AutoTempest (Private)",
+    "ll": "AutoTempest (Dealer)",
+    "ry": "AutoTempest (Dealer)",
+    "btc": "AutoTempest (Dealer)",
+    "somo": "AutoTempest (Dealer)",
+    "ssm": "AutoTempest (Dealer)",
+    "cgu": "CarGurus",
+}
 
 
 def build_search_url(**params) -> str:
@@ -102,6 +142,7 @@ def _extract_row(page, section) -> Optional[Listing]:
     image_url = img_el.get_attribute("data-img") if img_el else None
 
     sitecode = section.get_attribute("data-backend-sitecode")
+    source_site = SITE_NAMES.get(sitecode, sitecode)
 
     vin = None
     share_btn = section.query_selector(SELECTORS["share_button"])
@@ -115,7 +156,7 @@ def _extract_row(page, section) -> Optional[Listing]:
         title=title,
         price=price,
         mileage=mileage,
-        source_site=sitecode,
+        source_site=source_site,
         location=location,
         listing_url=url,
         image_url=image_url,
@@ -128,7 +169,7 @@ def scrape_search(
     max_listings: Optional[int] = None,
     headless: bool = True,
     extra_wait_seconds: float = 6.0,
-    click_more_rounds: int = 0,
+    click_more_rounds: int = 15,
 ) -> list[Listing]:
     """Scrape one AutoTempest search-results page.
 
@@ -189,7 +230,7 @@ def scrape_search(
 
 
 if __name__ == "__main__":
-    url = build_search_url(make="toyota", model="camry", zip="90001", rad=50)
+    url = build_search_url(make="toyota", model="camry", zip="90001", radius=50)
     results = scrape_search(url, max_listings=20, headless=True)
     for r in results:
         print(r.title, "|", r.price, "|", r.vin, "|", r.source_site, "|", r.listing_url)
