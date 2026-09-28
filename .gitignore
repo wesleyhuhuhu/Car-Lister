@@ -1,0 +1,13 @@
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+venv/
+
+# Scraper output and debug dumps
+listings.csv
+listings.json
+autotempest_debug.html
+autotempest_debug.png

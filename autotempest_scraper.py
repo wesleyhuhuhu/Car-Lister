@@ -95,14 +95,35 @@ def build_search_url(**params) -> str:
     """Build an AutoTempest search URL from keyword params.
 
     AutoTempest's own links sort query params alphabetically by key (e.g.
-    make, maxyear, minyear, model, radius, zip), so we do the same rather
-    than hardcoding one order.
+    localization, make, maxyear, minyear, model, radius, zip), so we do the
+    same rather than hardcoding one order.
+
+    `radius` accepts a mile value (25/50/100/300/500/1000) *or* one of the
+    special distance keywords "state", "country" (nationwide), or "any"
+    (anywhere). Those keywords are sent as a `localization` param instead
+    of `radius` -- AutoTempest drops `radius` from the URL entirely for
+    them -- so this function does that translation for you.
 
     Example:
         build_search_url(make="toyota", model="camry", zip="90001",
                           radius=50, minyear=2018, maxyear=2023)
+        build_search_url(make="bmw", model="3series", zip="91748",
+                          radius="country")  # nationwide
     """
+    LOCALIZATION_KEYWORDS = {"state", "country", "nationwide", "any"}
+
     query = {k: v for k, v in params.items() if v is not None}
+
+    radius = query.pop("radius", None)
+    if radius is not None:
+        radius_str = str(radius).strip().lower()
+        if radius_str == "nationwide":
+            radius_str = "country"
+        if radius_str in LOCALIZATION_KEYWORDS:
+            query["localization"] = radius_str
+        else:
+            query["radius"] = radius
+
     sorted_query = {k: query[k] for k in sorted(query)}
     return f"{BASE_URL}?{urllib.parse.urlencode(sorted_query)}"
 

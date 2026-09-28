@@ -120,7 +120,8 @@ def main():
     parser.add_argument("--make", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--zip", required=True)
-    parser.add_argument("--radius", type=int, default=50)
+    parser.add_argument("--radius", type=str, default="50",
+                         help="Miles (25/50/100/300/500/1000), or 'state', 'country' (nationwide), or 'any' (anywhere)")
     parser.add_argument("--minyear", type=int)
     parser.add_argument("--maxyear", type=int)
     parser.add_argument("--minprice", type=int)
