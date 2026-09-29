@@ -11,6 +11,9 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 # Vehicle information
 # ---------------------------------------------------------------------------
 
+# How long to wait for bimmer.work to show the vehicle information.
+VEHICLE_WAIT_SECONDS = 35
+
 VEHICLE_FIELDS = (
     "Market",
     "Transmission",
@@ -67,11 +70,11 @@ def scrape_vehicle_information(page: Page) -> dict[str, str | None]:
             "xpath=//th[normalize-space(.)='Market']"
         ).wait_for(
             state="visible",
-            timeout=30_000,
+            timeout=VEHICLE_WAIT_SECONDS * 1000,
         )
     except PlaywrightTimeoutError:
         raise RuntimeError(
-            "Vehicle information did not appear within 30 seconds."
+            f"Vehicle information did not appear within {VEHICLE_WAIT_SECONDS} seconds."
         )
 
     vehicle_info = {}
