@@ -1,34 +1,86 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 from scrape_bmw_data import scrape_bmw_build_sheet
 
-CHROME_PATH = Path(
-    r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-)
+def find_chrome() -> Path | None:
+    """Locate a Chromium-based browser on this machine. Set the CHROME_PATH
+    environment variable (or .env-style shell setting) to force a specific one.
+    Prefers Google Chrome, then falls back to Microsoft Edge / Chromium."""
+    override = os.environ.get("CHROME_PATH")
+    if override:
+        return Path(override)
 
-CHROME_PROFILE = Path(
-    r"C:\\Users\\wesle\\AppData\\Local\\ChromeAutomation"
-)
+    candidates: list[Path] = []
+    if sys.platform.startswith("win"):
+        for var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(var)
+            if base:
+                candidates.append(Path(base) / "Google/Chrome/Application/chrome.exe")
+        for var in ("PROGRAMFILES(X86)", "PROGRAMFILES"):
+            base = os.environ.get(var)
+            if base:
+                candidates.append(Path(base) / "Microsoft/Edge/Application/msedge.exe")
+    elif sys.platform == "darwin":
+        candidates += [
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+            Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        ]
+    for path in candidates:
+        if path.exists():
+            return path
+
+    for name in ("google-chrome", "google-chrome-stable", "chrome",
+                 "chromium", "chromium-browser", "microsoft-edge", "msedge"):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
+
+
+def default_profile_dir() -> Path:
+    """Where the automation browser keeps its own profile (cookies, cleared
+    captchas). Chrome only allows remote debugging on a non-default profile, so
+    this is a separate folder, created automatically for whoever runs the tool.
+    Override with the CHROME_PROFILE environment variable."""
+    override = os.environ.get("CHROME_PROFILE")
+    if override:
+        return Path(override)
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:                                   # Windows
+        legacy = Path(local_app_data) / "ChromeAutomation"
+        if legacy.exists():                              # keep an earlier setup working
+            return legacy
+        return Path(local_app_data) / "CarLister" / "ChromeProfile"
+    return Path.home() / ".car-lister" / "chrome-profile"
+
+
+CHROME_PATH = find_chrome()
+CHROME_PROFILE = default_profile_dir()
 
 CDP_HOST = "127.0.0.1"
-CDP_PORT = 9222
+CDP_PORT = int(os.environ.get("CDP_PORT", "9222"))
 CDP_URL = f"http://{CDP_HOST}:{CDP_PORT}"
 
 
 def start_chrome() -> subprocess.Popen:
     """
-    Start Google Chrome with a separate profile and remote debugging.
+    Start Chrome (or Edge) with a separate profile and remote debugging.
     """
 
-    if not CHROME_PATH.exists():
+    if CHROME_PATH is None or not CHROME_PATH.exists():
         raise FileNotFoundError(
-            f"Chrome was not found at:\n{CHROME_PATH}"
+            "Chrome was not found. Install Google Chrome, or set the "
+            "CHROME_PATH environment variable to your chrome/msedge executable."
         )
 
     CHROME_PROFILE.mkdir(
@@ -40,6 +92,8 @@ def start_chrome() -> subprocess.Popen:
         str(CHROME_PATH),
         f"--remote-debugging-port={CDP_PORT}",
         f"--user-data-dir={CHROME_PROFILE}",
+        "--no-first-run",
+        "--no-default-browser-check",
     ]
 
     print("Starting Google Chrome...")
@@ -141,6 +195,34 @@ class BmwSession:
                 self._chrome.kill()
         self._chrome = self._playwright = self._browser = self.page = None
 
+    def _describe_missing_form(self, vin: str) -> str:
+        """The page did not show the VIN box / Submit button. Save a screenshot
+        and the HTML for inspection and describe what the page does contain."""
+        page = self.page
+        debug_dir = Path("bmw_debug")
+        details = []
+        try:
+            debug_dir.mkdir(exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            png, html = debug_dir / f"{vin}-{stamp}.png", debug_dir / f"{vin}-{stamp}.html"
+            page.screenshot(path=str(png), full_page=True)
+            html.write_text(page.content(), encoding="utf-8")
+            details.append(f"Saved {png} and {html}.")
+        except Exception as exc:
+            details.append(f"(could not save debug files: {exc})")
+        try:
+            buttons = [t.strip() for t in page.get_by_role("button").all_inner_texts() if t.strip()]
+            details.append(f"Buttons on the page: {buttons or 'none'}. URL: {page.url}. Title: {page.title()!r}.")
+        except Exception:
+            pass
+        try:
+            text = " ".join(page.inner_text("body").split())
+            details.append(f"Page text: {text[:400]!r}")
+        except Exception:
+            pass
+        return ("The VIN box or Submit button did not appear on bimmer.work "
+                "(possibly a usage limit). " + " ".join(details))
+
     def lookup(self, vin: str):
         page = self.page
 
@@ -151,13 +233,15 @@ class BmwSession:
 
         print(f"Entering VIN: {vin}")
 
-        page.get_by_role("textbox").first.fill(vin)
+        submit = page.get_by_role("button", name="Submit", exact=True)
+        try:
+            page.get_by_role("textbox").first.wait_for(state="visible", timeout=20_000)
+            page.get_by_role("textbox").first.fill(vin)
+            submit.wait_for(state="visible", timeout=20_000)
+        except PlaywrightTimeoutError:
+            raise RuntimeError(self._describe_missing_form(vin))
 
-        page.get_by_role(
-            "button",
-            name="Submit",
-            exact=True,
-        ).click()
+        submit.click()
 
         page.wait_for_url(
             "**/vin/**",

@@ -49,6 +49,43 @@ Options: `--min-year`, `--trim`, `--delay` (seconds between lookups, default 10)
 `--max-cooldowns` (default 3). Progress is saved after every VIN. When bimmer.work stops responding it
 stops cleanly and reports how many worked; run it again later and finished VINs are skipped.
 
+## 3. Put the listings in an online database
+
+Hosted PostgreSQL (Supabase or Neon, both have free tiers). Factory options are stored as a list of codes, so "has 248 and 5AU" is one fast query.
+
+1. Create a project and copy its connection string (Supabase: Project Settings > Database > Connection string, "Session pooler").
+2. Create a file named `.env` next to the scripts (it is git-ignored):
+   `DATABASE_URL=postgresql://user:password@host:5432/postgres`
+3. `pip install "psycopg[binary]"`
+4. `python db_sync.py --init` the first time, then just `python db_sync.py` after each scrape/lookup.
+   `--dry-run` shows what would be sent without connecting.
+
+`listings.json` stays the source of truth. Each sync refreshes price/mileage and never erases a saved options lookup.
+Example query (SQL editor in the dashboard):
+
+```sql
+select year, trim, price, mileage, listing_url from listings
+where option_codes @> array['248','5AU'] and price < 80000 order by price;
+```
+
+Row level security is on with no public policy, so only your password can read or write. See the end of `schema.sql` to allow public read.
+
+### Automatic database updates
+
+Once `.env` has `SUPABASE_URL` and `SUPABASE_SERVICE_KEY`, the database updates itself:
+
+- `main.py` pushes every listing after each scrape (changed price/mileage/etc. update the existing row, new VINs are added).
+- `lookup_options.py` and `lookup_matching.py` push each VIN's options as soon as it is looked up.
+- Add `--no-db` to any of them to skip it. With no `.env` keys, pushing is simply off.
+- If the database can't be reached, the local files are still saved, a warning is printed, and pushing pauses for that run.
+  Run `python db_sync_https.py` afterwards to catch the database up.
+
+### If your network blocks the database ports
+
+Use `db_sync_https.py` instead (works over normal HTTPS, no psycopg needed). Paste `schema.sql` into the Supabase
+SQL Editor and run it once, put `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` (the secret / service_role key) in `.env`,
+then `python db_sync_https.py`.
+
 ## Debug helpers
 
 - `debug_selectors.py`: dumps the AutoTempest page to fix selectors if the site changes.

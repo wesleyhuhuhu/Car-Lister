@@ -13,7 +13,8 @@ next time, and re-running main.py never overwrites it.
 
 Each VIN must already be in the saved listings (run main.py first). Only BMW
 is supported so far. Results are saved after every VIN, so stopping partway
-loses nothing. To look up every listing matching a filter, see
+loses nothing. If the online database is configured (.env), each result is
+also pushed to it as soon as it is saved (--no-db skips that). To look up every listing matching a filter, see
 lookup_matching.py, which uses lookup_vins() below.
 """
 import argparse
@@ -21,6 +22,7 @@ import sys
 import time
 
 from bmw_lookup import BmwSession
+from db_push import db_configured, push_rows
 from listing_store import load_rows, save_all
 from vin_router import route_listing
 
@@ -31,10 +33,15 @@ def options_as_list(build_sheet: dict) -> list[str]:
             for code, description in build_sheet.get("Options", {}).items()]
 
 
-def lookup_vins(rows, targets, out_prefix: str, delay: float, max_failures: int) -> dict:
+def lookup_vins(rows, targets, out_prefix: str, delay: float, max_failures: int,
+                push_to_db: bool = False) -> dict:
     """Look up each (vin, row) in `targets` in one shared Chrome session and
     save after every success. `rows` is the full saved list (the targets'
     dicts are entries of it), so each save writes everything.
+
+    With `push_to_db`, each saved lookup is also pushed to the online database
+    right away. If a push fails (a warning is printed), pushing is switched off
+    for the rest of the call; db_sync_https.py catches the database up later.
 
     Stops early after `max_failures` failures in a row (the site is probably
     rate-limiting or blocking). Returns:
@@ -48,6 +55,7 @@ def lookup_vins(rows, targets, out_prefix: str, delay: float, max_failures: int)
     remaining = []
     in_a_row = 0
     stopped_early = False
+    db_ok = push_to_db
 
     with BmwSession() as session:
         for i, (vin, row) in enumerate(targets, start=1):
@@ -72,6 +80,13 @@ def lookup_vins(rows, targets, out_prefix: str, delay: float, max_failures: int)
             save_all(rows, out_prefix)
             saved += 1
             print(f"  saved {len(row['options'])} options")
+            if db_ok:
+                db_ok = push_rows([row], quiet=True)
+                if db_ok:
+                    print("  database updated")
+                else:
+                    print("  Database push failed; no more pushes this run. "
+                          "Run db_sync_https.py later to catch up.")
 
     if not stopped_early:
         remaining = failed
@@ -89,6 +104,8 @@ def main():
                          help="Seconds to wait between lookups (be gentle; the site can rate-limit)")
     parser.add_argument("--max-failures", type=int, default=3,
                          help="Stop after this many failed lookups in a row (likely rate-limited or blocked)")
+    parser.add_argument("--no-db", action="store_true",
+                         help="Don't push results to the online database")
     args = parser.parse_args()
 
     json_path = f"{args.out_prefix}.json"
@@ -122,7 +139,8 @@ def main():
         print("Nothing to look up.")
         return
 
-    stats = lookup_vins(rows, to_check, args.out_prefix, args.delay, args.max_failures)
+    stats = lookup_vins(rows, to_check, args.out_prefix, args.delay, args.max_failures,
+                        push_to_db=not args.no_db and db_configured())
     if stats["stopped_early"]:
         print("Wait a while, then run it again for the remaining VINs.")
     not_attempted = len(to_check) - stats["saved"] - stats["failed"]

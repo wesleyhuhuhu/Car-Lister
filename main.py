@@ -8,6 +8,9 @@ Scrape AutoTempest search results into listings.json / listings.csv.
   3. Merge into any existing listings.json by VIN (a known VIN has its
      price/mileage/etc. refreshed; a new VIN is appended) and save JSON + CSV.
 
+If the online database is configured (.env), the merged listings are then pushed
+to it too (changed rows are updated); --no-db skips that.
+
 Factory options are NOT collected here, and rows you already looked up keep
 their saved options through every re-scrape. To fetch options for specific
 VINs, use lookup_options.py.
@@ -20,6 +23,7 @@ import concurrent.futures
 import threading
 
 from autotempest_scraper import build_search_url, scrape_search
+from db_push import db_configured, push_rows
 from listing_store import load_rows, merge_rows, row_key, save_all
 from vin_lookup import decode_vin_nhtsa
 
@@ -98,6 +102,8 @@ def main():
                          help="Re-save the output files after this many VIN decodes finish")
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--out-prefix", default="listings")
+    parser.add_argument("--no-db", action="store_true",
+                         help="Don't push the listings to the online database (see db_push.py)")
     parser.add_argument("--no-merge", action="store_true",
                          help="Ignore any existing saved listings (they are overwritten, saved lookups included)")
     args = parser.parse_args()
@@ -137,6 +143,15 @@ def main():
     merged_rows = merge_rows(existing_rows, listings)
     save_all(merged_rows, args.out_prefix)
     print(f"Saved {args.out_prefix}.csv and {json_path} ({len(merged_rows)} total listings on file)")
+
+    if args.no_db:
+        pass
+    elif db_configured():
+        print("Updating the online database...")
+        if not push_rows(merged_rows):
+            print("Database not updated; the local files are saved. Run db_sync_https.py later to catch up.")
+    else:
+        print("Online database not configured (SUPABASE_URL / SUPABASE_SERVICE_KEY): skipped.")
 
 
 if __name__ == "__main__":

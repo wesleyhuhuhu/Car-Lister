@@ -19,6 +19,7 @@ import sys
 import time
 from collections import Counter
 
+from db_push import db_configured
 from listing_store import load_rows
 from lookup_options import lookup_vins
 from vin_router import route_listing
@@ -41,6 +42,7 @@ def main():
     parser.add_argument("--trim", default="M3 xDrive Competition",
                          help='Trim to match exactly, ignoring case and extra spaces (default "M3 xDrive Competition")')
     parser.add_argument("--out-prefix", default="listings")
+    parser.add_argument("--no-db", action="store_true", help="Don't push results to the online database")
     parser.add_argument("--dry-run", action="store_true", help="List the matching VINs and exit; nothing is looked up")
     parser.add_argument("--limit", type=int, default=None, help="Look up at most this many VINs in this run")
     parser.add_argument("--delay", type=float, default=10.0,
@@ -90,7 +92,8 @@ def main():
     total_saved = 0
     cooldowns_used = 0
     while pending:
-        stats = lookup_vins(rows, pending, args.out_prefix, args.delay, args.max_failures)
+        stats = lookup_vins(rows, pending, args.out_prefix, args.delay, args.max_failures,
+                            push_to_db=not args.no_db and db_configured())
         total_saved += stats["saved"]
         pending = stats["remaining"]
         if not pending or not stats["stopped_early"]:
