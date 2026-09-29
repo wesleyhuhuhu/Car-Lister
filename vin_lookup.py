@@ -16,6 +16,7 @@ behind a CAPTCHA. See the conversation for why.
 """
 import re
 import json
+import time
 import requests
 from bs4 import BeautifulSoup
 from typing import Optional
@@ -104,15 +105,39 @@ def extract_factory_options(soup: BeautifulSoup) -> list[str]:
     return deduped
 
 
-def decode_vin_nhtsa(vin: str) -> dict:
-    """Decode a VIN via NHTSA's free vPIC API. Returns broad specs, not
-    factory option packages."""
-    url = f"https://vpic.nhtsa.gov/api/vehicles/decodevin/{vin}?format=json"
-    try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        results = {r["Variable"]: r["Value"] for r in resp.json().get("Results", []) if r.get("Value")}
-    except requests.RequestException:
+NHTSA_DECODE_URL = "https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin}?format=json"
+
+# vPIC uses null / "" / "Not Applicable" for values it has no data on.
+_NO_VALUE = {"", "null", "not applicable"}
+
+
+def decode_vin_nhtsa(vin: str, retries: int = 2) -> dict:
+    """Decode a VIN via NHTSA's free vPIC API. Returns broad specs (year, make,
+    model, trim, ...), not factory option packages. Any spec vPIC has no data
+    for comes back as None.
+
+    Transient failures are retried; if the lookup still fails, a warning is
+    printed (so it is never silent) and {} is returned."""
+    url = NHTSA_DECODE_URL.format(vin=vin)
+    results = None
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            results = {}
+            for item in resp.json().get("Results", []):
+                value = str(item.get("Value") or "").strip()
+                if value.lower() not in _NO_VALUE:
+                    results[item["Variable"]] = value
+            break
+        except (requests.RequestException, ValueError, KeyError) as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+
+    if results is None:
+        print(f"  NHTSA decode failed for {vin}: {last_error.__class__.__name__}: {last_error}")
         return {}
 
     return {

@@ -12,7 +12,7 @@ from playwright.sync_api import sync_playwright
 from autotempest_scraper import build_search_url
 
 def main():
-    url = build_search_url(make="toyota", model="camry", zip="90001", rad=50)
+    url = build_search_url(make="toyota", model="camry", zip="90001", radius=50)
     print(f"Loading: {url}")
 
     with sync_playwright() as p:

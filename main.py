@@ -1,122 +1,84 @@
 """
-End-to-end pipeline:
-  1. Search AutoTempest (autotempest_scraper.py)
-  2. For each listing, visit its destination page and extract factory
-     options (VIN usually already comes from the search page itself)
-  3. Filter listings by option keywords
-  4. Merge into any existing saved listings.json by VIN (existing VINs get
-     updated in place; new ones get appended) and save CSV/JSON
+Scrape AutoTempest search results into listings.json / listings.csv.
+
+  1. Search AutoTempest (autotempest_scraper.py): title, price, mileage,
+     location, source site, link and VIN come straight off the search page.
+  2. Decode each VIN with NHTSA's free vPIC API for year/make/model/trim.
+     VINs already saved with specs reuse them instead of calling the API.
+  3. Merge into any existing listings.json by VIN (a known VIN has its
+     price/mileage/etc. refreshed; a new VIN is appended) and save JSON + CSV.
+
+Factory options are NOT collected here, and rows you already looked up keep
+their saved options through every re-scrape. To fetch options for specific
+VINs, use lookup_options.py.
 
 Usage:
-    python main.py --make toyota --model camry --zip 90001 --radius 50 \
-        --require "sunroof,leather"
+    python main.py --make bmw --model m3 --zip 91748 --radius 500 --minyear 2021
 """
 import argparse
-import csv
-import json
-import os
-import time
+import concurrent.futures
+import threading
 
 from autotempest_scraper import build_search_url, scrape_search
-from vin_lookup import enrich_listing
+from listing_store import load_rows, merge_rows, row_key, save_all
+from vin_lookup import decode_vin_nhtsa
 
-CSV_FIELDS = ["title", "price", "mileage", "year", "make", "model", "trim",
-              "vin", "options", "source_site", "location", "listing_url"]
-
-
-def enrich_all(listings, delay: float = 1.0):
-    """Enrich each listing in place with options and NHTSA specs (VIN is
-    reused if the search page already gave us one).
-    `delay` throttles requests to the destination sites -- be a good citizen."""
-    for listing in listings:
-        if not listing.listing_url:
-            continue
-        data = enrich_listing(listing.listing_url, known_vin=listing.vin)
-        listing.vin = data["vin"]
-        listing.options = data["options"]
-        specs = data.get("specs") or {}
-        listing.year = listing.year or specs.get("year")
-        listing.make = listing.make or specs.get("make")
-        listing.model = listing.model or specs.get("model")
-        listing.trim = listing.trim or specs.get("trim")
-        time.sleep(delay)
-    return listings
+SPEC_FIELDS = ("year", "make", "model", "trim")
 
 
-def filter_by_options(listings, required_keywords: list[str]):
-    """Keep only listings whose extracted options mention ALL of the given
-    keywords (case-insensitive substring match)."""
-    if not required_keywords:
-        return listings
-    keywords = [k.strip().lower() for k in required_keywords if k.strip()]
-    filtered = []
-    for listing in listings:
-        options_blob = " ".join(listing.options).lower()
-        if all(kw in options_blob for kw in keywords):
-            filtered.append(listing)
-    return filtered
+def fill_specs(
+    listings,
+    existing_by_key: dict[str, dict] | None = None,
+    max_workers: int = 8,
+    save_every: int = 25,
+    on_progress=None,
+) -> dict:
+    """Fill year/make/model/trim on each listing, concurrently. A VIN that is
+    already saved with specs reuses them instead of calling NHTSA again.
+    Calls `on_progress()` every `save_every` completions (used for incremental
+    saving) and returns a stats dict."""
+    existing_by_key = existing_by_key or {}
+    stats = {"reused": 0, "decoded": 0, "no_specs": 0, "no_vin": 0}
+    stats_lock = threading.Lock()
+    completed = 0
+    total = len(listings)
 
-
-def _row_key(row: dict) -> str:
-    """VIN when we have one (the normal case); fall back to the listing URL
-    for the rare listing with no VIN, so it still merges consistently."""
-    vin = (row.get("vin") or "").strip()
-    return vin if vin else f"url:{row.get('listing_url')}"
-
-
-def load_existing_rows(json_path: str) -> list[dict]:
-    if not os.path.exists(json_path):
-        return []
-    with open(json_path, encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return []
-
-
-def merge_rows(existing_rows: list[dict], new_listings) -> list[dict]:
-    """Merge freshly scraped listings into the existing saved set, keyed by
-    VIN: a VIN already on file gets its row updated in place (fresher price,
-    mileage, options, etc.); a new VIN gets appended. Order is preserved --
-    existing rows keep their position, new ones go at the end."""
-    by_key: dict[str, dict] = {}
-    order: list[str] = []
-    for row in existing_rows:
-        k = _row_key(row)
-        by_key[k] = row
-        order.append(k)
-
-    for listing in new_listings:
-        row = listing.to_dict()
-        k = _row_key(row)
-        if k in by_key:
-            by_key[k].update(row)
+    def process(listing):
+        existing = existing_by_key.get(
+            row_key({"vin": listing.vin, "listing_url": listing.listing_url})
+        )
+        if existing and all(existing.get(f) for f in ("year", "make", "model")):
+            specs, status = existing, "reused"
+        elif not listing.vin:
+            specs, status = {}, "no_vin"
         else:
-            by_key[k] = row
-            order.append(k)
+            try:
+                specs = decode_vin_nhtsa(listing.vin)
+            except Exception:
+                specs = {}
+            # decode_vin_nhtsa returns a dict of Nones for a VIN NHTSA can't
+            # decode, so check for real values rather than a non-empty dict.
+            status = "decoded" if any(specs.get(f) for f in SPEC_FIELDS) else "no_specs"
+        for field in SPEC_FIELDS:
+            setattr(listing, field, getattr(listing, field) or specs.get(field))
+        with stats_lock:
+            stats[status] += 1
+        return listing, status
 
-    return [by_key[k] for k in order]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process, l) for l in listings]
+        for future in concurrent.futures.as_completed(futures):
+            listing, status = future.result()
+            completed += 1
+            print(f"  [{completed}/{total}] {status:9s} {listing.title[:60]}")
+            if on_progress and (completed % save_every == 0 or completed == total):
+                on_progress()
 
-
-def save_csv(rows: list[dict], path: str):
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        for row in rows:
-            out = dict(row)
-            options = out.get("options") or []
-            if isinstance(options, list):
-                out["options"] = "; ".join(options)
-            writer.writerow({k: out.get(k) for k in CSV_FIELDS})
-
-
-def save_json(rows: list[dict], path: str):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=2)
+    return stats
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Search AutoTempest and enrich with factory options.")
+    parser = argparse.ArgumentParser(description="Scrape AutoTempest into listings.json / listings.csv.")
     parser.add_argument("--make", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--zip", required=True)
@@ -130,14 +92,14 @@ def main():
                          help="Cap on listings scraped; omit for no cap (grab everything available)")
     parser.add_argument("--click-more-rounds", type=int, default=15,
                          help="How many times to click each source's 'More Results' button to load additional pages")
-    parser.add_argument("--require", type=str, default="",
-                         help="Comma-separated option keywords that must all be present")
-    parser.add_argument("--delay", type=float, default=1.0,
-                         help="Seconds to wait between requests to destination sites")
+    parser.add_argument("--max-workers", type=int, default=8,
+                         help="How many NHTSA VIN decodes to run concurrently")
+    parser.add_argument("--save-every", type=int, default=25,
+                         help="Re-save the output files after this many VIN decodes finish")
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--out-prefix", default="listings")
     parser.add_argument("--no-merge", action="store_true",
-                         help="Overwrite the output files instead of merging with any existing saved listings")
+                         help="Ignore any existing saved listings (they are overwritten, saved lookups included)")
     args = parser.parse_args()
 
     search_url = build_search_url(
@@ -152,25 +114,29 @@ def main():
         headless=args.headless,
         click_more_rounds=args.click_more_rounds,
     )
-    print(f"Found {len(listings)} listings. Enriching with VIN + options...")
-
-    enrich_all(listings, delay=args.delay)
-
-    required = args.require.split(",") if args.require else []
-    filtered = filter_by_options(listings, required)
-    print(f"{len(filtered)} listings match required options: {required or 'none'}")
+    print(f"Found {len(listings)} listings. Decoding VINs (year/make/model/trim)...")
 
     json_path = f"{args.out_prefix}.json"
-    if args.no_merge:
-        merged_rows = [l.to_dict() for l in filtered]
-    else:
-        existing_rows = load_existing_rows(json_path)
-        merged_rows = merge_rows(existing_rows, filtered)
-        print(f"Merged with {len(existing_rows)} previously saved listings -> {len(merged_rows)} total")
+    existing_rows = [] if args.no_merge else load_rows(json_path)
+    existing_by_key = {row_key(r): r for r in existing_rows}
+    if existing_rows:
+        print(f"Loaded {len(existing_rows)} previously saved listings.")
 
-    save_csv(merged_rows, f"{args.out_prefix}.csv")
-    save_json(merged_rows, json_path)
-    print(f"Saved {args.out_prefix}.csv and {json_path}")
+    def save_progress():
+        save_all(merge_rows(existing_rows, listings), args.out_prefix)
+
+    stats = fill_specs(
+        listings,
+        existing_by_key=existing_by_key,
+        max_workers=args.max_workers,
+        save_every=args.save_every,
+        on_progress=save_progress,
+    )
+    print(f"VIN decode summary: {stats}")
+
+    merged_rows = merge_rows(existing_rows, listings)
+    save_all(merged_rows, args.out_prefix)
+    print(f"Saved {args.out_prefix}.csv and {json_path} ({len(merged_rows)} total listings on file)")
 
 
 if __name__ == "__main__":
