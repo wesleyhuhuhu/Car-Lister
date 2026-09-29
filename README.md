@@ -36,6 +36,19 @@ Saves after every VIN; stops after 3 failures in a row. BMW only for now (bimmer
 
 Rows saved before this change still hold old scraped options, which were unreliable. They stay until you look that VIN up.
 
+## 2b. Look up every matching VIN (with rate-limit handling)
+
+```bash
+python lookup_matching.py --dry-run          # just list what would be looked up
+python lookup_matching.py                    # year >= 2022, trim "M3 xDrive Competition"
+python lookup_matching.py --limit 5          # only try 5 this run
+python lookup_matching.py --cooldown 30      # if bimmer.work stops, wait 30 min and continue
+```
+
+Options: `--min-year`, `--trim`, `--delay` (seconds between lookups, default 10), `--max-failures` (default 3),
+`--max-cooldowns` (default 3). Progress is saved after every VIN. When bimmer.work stops responding it
+stops cleanly and reports how many worked; run it again later and finished VINs are skipped.
+
 ## Debug helpers
 
 - `debug_selectors.py`: dumps the AutoTempest page to fix selectors if the site changes.

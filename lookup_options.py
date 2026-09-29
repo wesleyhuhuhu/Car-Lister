@@ -13,7 +13,8 @@ next time, and re-running main.py never overwrites it.
 
 Each VIN must already be in the saved listings (run main.py first). Only BMW
 is supported so far. Results are saved after every VIN, so stopping partway
-loses nothing.
+loses nothing. To look up every listing matching a filter, see
+lookup_matching.py, which uses lookup_vins() below.
 """
 import argparse
 import sys
@@ -28,6 +29,54 @@ def options_as_list(build_sheet: dict) -> list[str]:
     """{"248": "Steering Wheel Heating"} -> ["248 Steering Wheel Heating"]"""
     return [f"{code} {description}".strip()
             for code, description in build_sheet.get("Options", {}).items()]
+
+
+def lookup_vins(rows, targets, out_prefix: str, delay: float, max_failures: int) -> dict:
+    """Look up each (vin, row) in `targets` in one shared Chrome session and
+    save after every success. `rows` is the full saved list (the targets'
+    dicts are entries of it), so each save writes everything.
+
+    Stops early after `max_failures` failures in a row (the site is probably
+    rate-limiting or blocking). Returns:
+        saved          lookups saved in this call
+        failed         lookups that failed in this call
+        remaining      (vin, row) pairs not saved: the failures plus any not attempted
+        stopped_early  True if it gave up because of consecutive failures
+    """
+    saved = 0
+    failed = []
+    remaining = []
+    in_a_row = 0
+    stopped_early = False
+
+    with BmwSession() as session:
+        for i, (vin, row) in enumerate(targets, start=1):
+            if i > 1:
+                time.sleep(delay)
+            print(f"[{i}/{len(targets)}] {vin}  {row.get('title', '')}")
+            try:
+                build_sheet = session.lookup(vin)
+            except Exception as exc:
+                failed.append((vin, row))
+                in_a_row += 1
+                print(f"  failed: {exc.__class__.__name__}: {exc}")
+                if in_a_row >= max_failures:
+                    stopped_early = True
+                    remaining = failed + list(targets[i:])
+                    print(f"Stopping after {in_a_row} failures in a row (rate-limited or blocked?).")
+                    break
+                continue
+            in_a_row = 0
+            row["options"] = options_as_list(build_sheet)
+            row["build_sheet"] = build_sheet
+            save_all(rows, out_prefix)
+            saved += 1
+            print(f"  saved {len(row['options'])} options")
+
+    if not stopped_early:
+        remaining = failed
+    return {"saved": saved, "failed": len(failed), "remaining": remaining,
+            "stopped_early": stopped_early}
 
 
 def main():
@@ -73,31 +122,11 @@ def main():
         print("Nothing to look up.")
         return
 
-    saved = failed = in_a_row = 0
-    with BmwSession() as session:
-        for i, (vin, row) in enumerate(to_check, start=1):
-            if i > 1:
-                time.sleep(args.delay)
-            print(f"[{i}/{len(to_check)}] {vin}  {row.get('title', '')}")
-            try:
-                build_sheet = session.lookup(vin)
-            except Exception as exc:
-                failed += 1
-                in_a_row += 1
-                print(f"  failed: {exc.__class__.__name__}: {exc}")
-                if in_a_row >= args.max_failures:
-                    print(f"Stopping after {in_a_row} failures in a row (rate-limited or blocked?). "
-                          "Wait a while, then run it again for the remaining VINs.")
-                    break
-                continue
-            in_a_row = 0
-            row["options"] = options_as_list(build_sheet)
-            row["build_sheet"] = build_sheet
-            save_all(rows, args.out_prefix)
-            saved += 1
-            print(f"  saved {len(row['options'])} options")
-
-    print(f"Done: {saved} saved, {failed} failed, {len(to_check) - saved - failed} not attempted.")
+    stats = lookup_vins(rows, to_check, args.out_prefix, args.delay, args.max_failures)
+    if stats["stopped_early"]:
+        print("Wait a while, then run it again for the remaining VINs.")
+    not_attempted = len(to_check) - stats["saved"] - stats["failed"]
+    print(f"Done: {stats['saved']} saved, {stats['failed']} failed, {not_attempted} not attempted.")
 
 
 if __name__ == "__main__":
