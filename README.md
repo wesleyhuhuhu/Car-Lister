@@ -18,9 +18,23 @@ python main.py --make bmw --model m3 --zip 91748 --radius 500 --minyear 2021
 ```
 
 Saves `listings.json` and `listings.csv`: title, price, mileage, location, source site, link, VIN,
-plus year/make/model/trim from NHTSA. Re-running refreshes price/mileage for known VINs and appends
+plus year/make/model/trim from NHTSA (decoded 50 VINs per request, so a big search is only a few requests).
+A value already saved is never blanked: if NHTSA is down or rate limiting, existing data is kept and the missing
+VINs are simply decoded on the next run. Re-running refreshes price/mileage for known VINs and appends
 new ones. Radius accepts miles, or `state` / `country` (nationwide) / `any`.
 Factory options are not collected here.
+
+### Fill in missing data on saved rows
+
+```bash
+python fill_missing.py --dry-run     # which saved rows are missing year/make/model
+python fill_missing.py               # decode them (NHTSA, 50 VINs per request), save, update the database
+```
+
+`main.py` only ever decodes the listings its own search returns, so one search never touches another search's rows.
+`fill_missing.py` is the one script that goes through everything on file (any make/model): sold listings, VINs that
+failed to decode earlier, rows from older searches. It never overwrites a saved value, skips rows with no VIN, and
+only pushes the rows it changed to the database. Use `--no-db` to skip the push.
 
 ## 2. Look up factory options for specific VINs
 
@@ -86,7 +100,72 @@ Use `db_sync_https.py` instead (works over normal HTTPS, no psycopg needed). Pas
 SQL Editor and run it once, put `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` (the secret / service_role key) in `.env`,
 then `python db_sync_https.py`.
 
+## 4. Shared database for other users
+
+Other people ("users") can help look up options; each person's own network has its own bimmer.work limit, so more users means more VINs done.
+
+**One-time setup (owner):**
+1. Supabase > SQL Editor: run `schema_shared.sql` (after `schema.sql`). Run it again after updating the project; it is safe to repeat.
+2. Supabase > Project Settings > API Keys: copy the Project URL and the **anon / publishable** key.
+3. Give users those two values (privately). **Never give out the secret / service_role key.**
+
+**Each user** installs Python, Chrome and `pip install requests playwright truststore`, gets the project files, and creates a `.env`:
+```
+SUPABASE_URL=https://xxxxxxxx.supabase.co
+SUPABASE_ANON_KEY=the-public-anon-key
+```
+
+**What users can and can't do:** read the `public_listings` view (this makes the listings public), claim VINs, submit an options result
+for a VIN that has none, and hand claims back. They can't read or change the table directly, delete anything, or overwrite an
+existing result. Trust still matters: a user could submit wrong options for a VIN that has none yet. To redo a VIN, set its
+`build_sheet` to null in the Table Editor. If a key leaks, rotate it in Project Settings > API Keys.
+
+### 4a. Work through the queue: `lookup_shared.py`
+
+```bash
+python lookup_shared.py --dry-run                 # how many are waiting / being worked on / done
+python lookup_shared.py --cooldown 15 --max-cooldowns 10
+```
+Options: `--limit`, `--delay`, `--claim-size`, `--min-year`, `--trim`, `--make`, `--worker` (your name in the database).
+A claimed VIN is skipped by others for 30 minutes. If bimmer.work stops, unfinished VINs are handed back. If sending a result fails it is kept in
+`unsent_options.jsonl` and sent next run.
+
+### 4b. The "Fetch options" button: `companion.py`
+
+A web page can't open Chrome on your computer, so the listings page's button talks to this small app running on the user's own computer:
+```bash
+python companion.py --allow-origin https://your-listings-page.example
+```
+It listens only on `127.0.0.1:8765`, only accepts requests from the page addresses you list (`--allow-origin`, or `COMPANION_ORIGINS` in `.env`,
+comma separated), does one lookup at a time with a pause between them, and pauses itself for 15 minutes after 3 failures in a row.
+Chrome opens on the first click and closes after 5 idle minutes.
+
+For the page: `GET /status`, `POST /fetch {"vin": "..."}` (202 queued, 409 unavailable, 429 blocked, 400 bad VIN, 403 page not allowed),
+`GET /job?vin=...` (`queued` / `running` / `done` / `failed`, plus `message`). Read listings from the `public_listings` view
+(`GET {SUPABASE_URL}/rest/v1/public_listings` with the anon key); `being_fetched` is true while someone holds a claim, and `options` fills in when a fetch finishes.
+
 ## Debug helpers
 
 - `debug_selectors.py`: dumps the AutoTempest page to fix selectors if the site changes.
 - `debug_bmw_page.py <VIN>`: dumps the bimmer.work vehicle and options pages.
+
+## Headless (no visible Chrome window)
+
+No environment variable needed:
+
+- `python companion.py` and `python lookup_shared.py` run **headless by default** (built for other users). Add `--show-browser` to see the window.
+- `python lookup_matching.py` and `python lookup_options.py` show the window by default. Add `--headless` to hide it.
+- `python check_bimmer.py --headless` works too.
+
+`BMW_HEADLESS=1` still works as a fallback default for the scripts that show the window. If bimmer.work starts behaving differently when headless (or shows a human check, which can't be clicked in a hidden window), run once with `--show-browser`.
+
+## Fallback site: oemnavigations.com
+
+If bimmer.work blocks a lookup (HTTP 429, or no VIN box / Submit button), the lookup automatically tries https://oemnavigations.com/pages/vin-decoder-app in the same Chrome window. Nothing else changes: the result is stored in the same shape (`Options` codes like `248`, plus `Color`, `Upholstery`, `Start of Production`), and `build_sheet["Source"]` says which site answered.
+
+- The site allows **2 free checks per day**. This tool records the attempts in `~/.car-lister/oem_usage.json` (UTC day) as a log only; it never blocks a lookup. The site enforces the limit itself, and when it refuses, its message is shown and the lookup fails.
+- The **second check of the day shows a Cloudflare human check**. It is never bypassed: in a visible window you tick it; in a hidden (`--headless`) window the lookup fails with a message to rerun with `--show-browser`.
+- After bimmer.work blocks, it is skipped for 10 minutes (`BMW_RETRY_MINUTES`) so each VIN doesn't wait on it first.
+- A VIN that bimmer.work simply doesn't know, or a timeout after submitting, does **not** trigger the fallback (it would waste one of the 2 checks).
+- Turn it off with `--no-fallback` (all lookup scripts) or `OEM_FALLBACK=0`.
+- This site lists options with a leading zero (`0248`, `01CB`); they are converted to bimmer.work's style (`248`, `1CB`). Option wording differs slightly between the sites.

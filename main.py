@@ -3,13 +3,16 @@ Scrape AutoTempest search results into listings.json / listings.csv.
 
   1. Search AutoTempest (autotempest_scraper.py): title, price, mileage,
      location, source site, link and VIN come straight off the search page.
-  2. Decode each VIN with NHTSA's free vPIC API for year/make/model/trim.
+  2. Decode the VINs with NHTSA's free vPIC API (50 per request) for year/make/model/trim.
      VINs already saved with specs reuse them instead of calling the API.
   3. Merge into any existing listings.json by VIN (a known VIN has its
      price/mileage/etc. refreshed; a new VIN is appended) and save JSON + CSV.
 
 If the online database is configured (.env), the merged listings are then pushed
 to it too (changed rows are updated); --no-db skips that.
+
+Only the listings this search returns are decoded. To fill in missing specs on
+rows already saved (sold listings, earlier failures), use fill_missing.py.
 
 Factory options are NOT collected here, and rows you already looked up keep
 their saved options through every re-scrape. To fetch options for specific
@@ -19,13 +22,11 @@ Usage:
     python main.py --make bmw --model m3 --zip 91748 --radius 500 --minyear 2021
 """
 import argparse
-import concurrent.futures
-import threading
 
 from autotempest_scraper import build_search_url, scrape_search
 from db_push import db_configured, push_rows
 from listing_store import load_rows, merge_rows, row_key, save_all
-from vin_lookup import decode_vin_nhtsa
+from vin_lookup import decode_all
 
 SPEC_FIELDS = ("year", "make", "model", "trim")
 
@@ -33,51 +34,66 @@ SPEC_FIELDS = ("year", "make", "model", "trim")
 def fill_specs(
     listings,
     existing_by_key: dict[str, dict] | None = None,
-    max_workers: int = 8,
-    save_every: int = 25,
+    batch_size: int = 50,
     on_progress=None,
 ) -> dict:
-    """Fill year/make/model/trim on each listing, concurrently. A VIN that is
-    already saved with specs reuses them instead of calling NHTSA again.
-    Calls `on_progress()` every `save_every` completions (used for incremental
-    saving) and returns a stats dict."""
-    existing_by_key = existing_by_key or {}
-    stats = {"reused": 0, "decoded": 0, "no_specs": 0, "no_vin": 0}
-    stats_lock = threading.Lock()
-    completed = 0
-    total = len(listings)
+    """Fill year/make/model/trim on each listing.
 
-    def process(listing):
+    - A VIN already saved with year/make/model is reused (no NHTSA call).
+    - Everything else is decoded in batches of up to 50 VINs per request.
+    - Values already known are never blanked: whatever a saved row has is
+      carried over, and a VIN NHTSA can't decode (or can't be reached for) just
+      keeps what it had.
+    Calls `on_progress()` after every batch (used for incremental saving) and
+    returns a stats dict."""
+    existing_by_key = existing_by_key or {}
+    stats = {"reused": 0, "decoded": 0, "no_specs": 0, "no_vin": 0, "not_decoded": 0}
+    pending: dict[str, list] = {}          # vin -> listings that need it
+
+    for listing in listings:
         existing = existing_by_key.get(
             row_key({"vin": listing.vin, "listing_url": listing.listing_url})
         )
+        if existing:                        # carry over anything already known
+            for field in SPEC_FIELDS:
+                if not getattr(listing, field) and existing.get(field):
+                    setattr(listing, field, existing[field])
         if existing and all(existing.get(f) for f in ("year", "make", "model")):
-            specs, status = existing, "reused"
+            stats["reused"] += 1
         elif not listing.vin:
-            specs, status = {}, "no_vin"
+            stats["no_vin"] += 1
         else:
-            try:
-                specs = decode_vin_nhtsa(listing.vin)
-            except Exception:
-                specs = {}
-            # decode_vin_nhtsa returns a dict of Nones for a VIN NHTSA can't
-            # decode, so check for real values rather than a non-empty dict.
-            status = "decoded" if any(specs.get(f) for f in SPEC_FIELDS) else "no_specs"
-        for field in SPEC_FIELDS:
-            setattr(listing, field, getattr(listing, field) or specs.get(field))
-        with stats_lock:
-            stats[status] += 1
-        return listing, status
+            pending.setdefault(listing.vin.strip().upper(), []).append(listing)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process, l) for l in listings]
-        for future in concurrent.futures.as_completed(futures):
-            listing, status = future.result()
-            completed += 1
-            print(f"  [{completed}/{total}] {status:9s} {listing.title[:60]}")
-            if on_progress and (completed % save_every == 0 or completed == total):
-                on_progress()
+    total = len(pending)
+    done = 0
+    if total:
+        print(f"  {stats['reused']} VINs already have specs; decoding {total} VINs "
+              f"({-(-total // batch_size)} NHTSA request(s))...")
 
+    def apply(specs_by_vin: dict) -> None:
+        nonlocal done
+        for vin, specs in specs_by_vin.items():
+            for listing in pending.get(vin, []):
+                for field in SPEC_FIELDS:
+                    if specs.get(field) and not getattr(listing, field):
+                        setattr(listing, field, specs[field])
+            found = any(specs.get(f) for f in SPEC_FIELDS)
+            stats["decoded" if found else "no_specs"] += len(pending.get(vin, []))
+            done += 1
+        print(f"  decoded {done}/{total}", flush=True)
+        if on_progress:
+            on_progress()
+
+    if total:
+        failed = decode_all(list(pending), batch_size=batch_size, on_batch=apply)
+        stats["not_decoded"] = sum(len(pending[v]) for v in failed if v in pending)
+        if stats["not_decoded"]:
+            print(f"  {stats['not_decoded']} listing(s) could not be decoded this time "
+                  "(NHTSA unreachable or rate limiting). Their existing data was kept; "
+                  "run again later to fill them in.")
+    if on_progress:
+        on_progress()
     return stats
 
 
@@ -96,10 +112,8 @@ def main():
                          help="Cap on listings scraped; omit for no cap (grab everything available)")
     parser.add_argument("--click-more-rounds", type=int, default=15,
                          help="How many times to click each source's 'More Results' button to load additional pages")
-    parser.add_argument("--max-workers", type=int, default=8,
-                         help="How many NHTSA VIN decodes to run concurrently")
-    parser.add_argument("--save-every", type=int, default=25,
-                         help="Re-save the output files after this many VIN decodes finish")
+    parser.add_argument("--decode-batch-size", type=int, default=50,
+                         help="VINs per NHTSA request (max 50)")
     parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--out-prefix", default="listings")
     parser.add_argument("--no-db", action="store_true",
@@ -134,8 +148,7 @@ def main():
     stats = fill_specs(
         listings,
         existing_by_key=existing_by_key,
-        max_workers=args.max_workers,
-        save_every=args.save_every,
+        batch_size=args.decode_batch_size,
         on_progress=save_progress,
     )
     print(f"VIN decode summary: {stats}")

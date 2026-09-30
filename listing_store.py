@@ -37,7 +37,8 @@ def merge_rows(existing_rows: list[dict], new_listings) -> list[dict]:
     """Merge freshly scraped listings into the saved rows, keyed by VIN.
 
     A VIN already on file has its row refreshed (price, mileage, location...)
-    except for LOOKUP_FIELDS, which are kept exactly as saved. A new VIN is
+    except for LOOKUP_FIELDS, which are kept exactly as saved, and except that an
+    empty new value never replaces a saved one. A new VIN is
     appended. Existing rows keep their position; new ones go at the end."""
     by_key: dict[str, dict] = {}
     order: list[str] = []
@@ -50,7 +51,14 @@ def merge_rows(existing_rows: list[dict], new_listings) -> list[dict]:
         row = listing.to_dict()
         k = row_key(row)
         if k in by_key:
-            by_key[k].update({f: v for f, v in row.items() if f not in LOOKUP_FIELDS})
+            for f, v in row.items():
+                if f in LOOKUP_FIELDS:
+                    continue
+                # A fresh scrape or a failed decode must never blank a value we
+                # already have (e.g. year/make/model/trim from an earlier run).
+                if v in (None, "") and by_key[k].get(f) not in (None, ""):
+                    continue
+                by_key[k][f] = v
         else:
             by_key[k] = row
             order.append(k)

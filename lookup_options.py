@@ -21,7 +21,7 @@ import argparse
 import sys
 import time
 
-from bmw_lookup import BmwSession
+from bmw_lookup import BmwSession, add_browser_args, apply_browser_args
 from db_push import db_configured, push_rows
 from listing_store import load_rows, save_all
 from vin_router import route_listing
@@ -106,7 +106,9 @@ def main():
                          help="Stop after this many failed lookups in a row (likely rate-limited or blocked)")
     parser.add_argument("--no-db", action="store_true",
                          help="Don't push results to the online database")
+    add_browser_args(parser)
     args = parser.parse_args()
+    apply_browser_args(args)
 
     json_path = f"{args.out_prefix}.json"
     rows = load_rows(json_path)

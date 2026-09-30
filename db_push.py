@@ -58,7 +58,9 @@ def to_payload(params: dict) -> dict:
     else:
         for col in LOOKUP_COLUMNS:
             row.pop(col)
-    return row
+    # Leave out empty fields entirely so an upsert never blanks a value the
+    # database already has (e.g. a year/make/model/trim from an earlier sync).
+    return {k: v for k, v in row.items() if v is not None}
 
 
 def _headers(key: str) -> dict:
@@ -82,11 +84,11 @@ def push_rows(rows: list[dict], batch_size: int = 100, quiet: bool = False) -> b
 
     payloads = [to_payload(to_params(r)) for r in rows]
     # PostgREST needs every row in one request to have the same columns, so rows
-    # with and without a saved lookup go in separate groups.
-    groups = [
-        [p for p in payloads if "build_sheet" in p],
-        [p for p in payloads if "build_sheet" not in p],
-    ]
+    # are grouped by which columns they carry.
+    by_columns: dict[frozenset, list] = {}
+    for p in payloads:
+        by_columns.setdefault(frozenset(p), []).append(p)
+    groups = list(by_columns.values())
     sent = 0
     try:
         for items in groups:

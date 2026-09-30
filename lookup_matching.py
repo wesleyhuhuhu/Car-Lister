@@ -19,6 +19,7 @@ import sys
 import time
 from collections import Counter
 
+from bmw_lookup import add_browser_args, apply_browser_args
 from db_push import db_configured
 from listing_store import load_rows
 from lookup_options import lookup_vins
@@ -53,7 +54,9 @@ def main():
                          help="Minutes to wait and then try the remaining VINs after the site stops. 0 (default) = just stop")
     parser.add_argument("--max-cooldowns", type=int, default=3,
                          help="How many times --cooldown may be used in one run (default 3)")
+    add_browser_args(parser)
     args = parser.parse_args()
+    apply_browser_args(args)
 
     json_path = f"{args.out_prefix}.json"
     rows = load_rows(json_path)

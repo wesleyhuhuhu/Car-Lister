@@ -151,6 +151,140 @@ def decode_vin_nhtsa(vin: str, retries: int = 2) -> dict:
     }
 
 
+NHTSA_BATCH_URL = "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVINValuesBatch/"
+NHTSA_BATCH_MAX = 50   # vPIC accepts at most 50 VINs per batch request
+
+
+def _flat_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def _specs_from_flat(record: dict) -> dict:
+    """One record of the flat batch response -> the same dict decode_vin_nhtsa
+    returns. Key spelling is matched loosely ('ModelYear' or 'Model Year')."""
+    flat = {}
+    for key, value in record.items():
+        value = str(value if value is not None else "").strip()
+        flat[_flat_key(key)] = None if value.lower() in _NO_VALUE else value
+    return {
+        "year": flat.get("modelyear"),
+        "make": flat.get("make"),
+        "model": flat.get("model"),
+        "trim": flat.get("trim"),
+        "engine": flat.get("engineconfiguration"),
+        "drivetrain": flat.get("drivetype"),
+        "body_style": flat.get("bodyclass"),
+    }
+
+
+def decode_vins_nhtsa_batch(
+    vins: list[str],
+    batch_size: int = NHTSA_BATCH_MAX,
+    retries: int = 2,
+    pause: float = 0.5,
+    max_failed_batches: int = 2,
+    on_batch=None,
+) -> dict:
+    """Decode many VINs with vPIC's batch endpoint: one request per 50 VINs
+    instead of one per VIN, which keeps us far away from NHTSA's rate limit.
+
+    `on_batch(specs_by_vin)` is called after every successful batch. Stops early
+    after `max_failed_batches` failed batches in a row (NHTSA is probably rate
+    limiting) so the rest of the run is not wasted. Returns:
+        failed        VINs that were not decoded (failed batches + not attempted)
+        stopped       True if it gave up early
+        unrecognized  True if NHTSA answered but not in the expected shape, so
+                      the caller can fall back to one-at-a-time decoding
+    Only VINs that NHTSA actually answered for appear in `on_batch`; a VIN it
+    answered "no data" for comes back with all values None."""
+    vins = list(dict.fromkeys(v.strip().upper() for v in vins if v and v.strip()))
+    batch_size = max(1, min(batch_size, NHTSA_BATCH_MAX))
+    failed: list[str] = []
+    unrecognized = stopped = False
+    failed_in_a_row = 0
+
+    for start in range(0, len(vins), batch_size):
+        batch = vins[start:start + batch_size]
+        specs_by_vin = None
+        last_error = None
+        for attempt in range(retries + 1):
+            try:
+                resp = requests.post(
+                    NHTSA_BATCH_URL,
+                    data={"format": "json", "data": ";".join(batch)},
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                records = resp.json().get("Results") or []
+                by_vin = {}
+                for rec in records:
+                    if isinstance(rec, dict):
+                        vin = str(rec.get("VIN") or "").strip().upper()
+                        if vin:
+                            by_vin[vin] = _specs_from_flat(rec)
+                if not by_vin and len(records) == len(batch) and all(isinstance(r, dict) for r in records):
+                    by_vin = {v: _specs_from_flat(r) for v, r in zip(batch, records)}  # no VIN echoed: match by order
+                if not by_vin:
+                    raise ValueError("unexpected response shape from NHTSA batch endpoint")
+                specs_by_vin = {v: by_vin[v] for v in batch if v in by_vin}
+                break
+            except ValueError as exc:            # includes bad JSON
+                last_error = exc
+                unrecognized = True
+                break
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt < retries:
+                    time.sleep(3.0 * (attempt + 1))
+
+        if specs_by_vin is None:
+            failed.extend(batch)
+            failed_in_a_row += 1
+            print(f"  NHTSA batch of {len(batch)} failed: {last_error.__class__.__name__}: {last_error}")
+            if unrecognized or failed_in_a_row >= max_failed_batches:
+                stopped = True
+                failed.extend(vins[start + batch_size:])
+                break
+        else:
+            failed_in_a_row = 0
+            missing = [v for v in batch if v not in specs_by_vin]
+            failed.extend(missing)
+            if on_batch:
+                on_batch(specs_by_vin)
+        if start + batch_size < len(vins):
+            time.sleep(pause)
+
+    return {"failed": failed, "stopped": stopped, "unrecognized": unrecognized}
+
+
+def decode_all(vins: list[str], batch_size: int = NHTSA_BATCH_MAX, on_batch=None) -> list[str]:
+    """Decode VINs with the batch endpoint, falling back to one VIN at a time
+    (slowly) if NHTSA answers the batch endpoint in a shape we don't understand.
+    `on_batch(specs_by_vin)` is called as results arrive. Returns the VINs that
+    could not be decoded (NHTSA unreachable or rate limiting)."""
+    result = decode_vins_nhtsa_batch(vins, batch_size=batch_size, on_batch=on_batch)
+    failed = result["failed"]
+    if not (result["unrecognized"] and failed):
+        return failed
+    print("  Batch decoding not usable; falling back to one VIN at a time...")
+    in_a_row, still_failed = 0, []
+    for i, vin in enumerate(failed):
+        if in_a_row >= 5:
+            still_failed = still_failed + failed[i:]
+            print("  NHTSA keeps failing; stopping decoding for this run.")
+            break
+        specs = decode_vin_nhtsa(vin)
+        if specs:
+            in_a_row = 0
+            if on_batch:
+                on_batch({vin: specs})
+        else:
+            in_a_row += 1
+            still_failed.append(vin)
+        time.sleep(0.3)
+    return still_failed
+
+
 def enrich_listing(listing_url: str, known_vin: Optional[str] = None) -> dict:
     """Fetch a listing's destination page and pull factory options (+ VIN
     if not already known from the AutoTempest search page itself)."""
