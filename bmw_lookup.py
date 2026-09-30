@@ -188,6 +188,64 @@ def wait_for_chrome(timeout: int = 15) -> None:
     )
 
 
+def _stop_chrome(process: subprocess.Popen) -> None:
+    """Stop the Chrome that Python started, including its helper processes. If any
+    helper survives it keeps the profile locked, and the next Chrome started with
+    the same profile would hand over to it and ignore its flags (e.g. no window)."""
+    if process.poll() is None:
+        if sys.platform.startswith("win"):
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+def wait_for_chrome_gone(timeout: int = 15) -> bool:
+    """Wait until nothing answers on the remote-debugging port any more."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(f"{CDP_URL}/json/version", timeout=1).close()
+        except Exception:
+            time.sleep(0.5)          # let the profile lock be released too
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def _chrome_answering() -> bool:
+    try:
+        urllib.request.urlopen(f"{CDP_URL}/json/version", timeout=1).close()
+        return True
+    except Exception:
+        return False
+
+
+def stop_profile_chrome() -> None:
+    """Stop any Chrome/Edge that is using the automation profile (a leftover from an
+    earlier run). Only processes started with this tool's own --user-data-dir are
+    touched; your normal Chrome is never affected."""
+    profile = str(CHROME_PROFILE)
+    print(f"Stopping a leftover automation Chrome that is still using {profile} ...")
+    try:
+        if sys.platform.startswith("win"):
+            script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and "
+                      "$_.CommandLine.Contains($env:CL_PROFILE) -and $_.Name -match 'chrome|msedge' } | "
+                      "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+            subprocess.run(["powershell", "-NoProfile", "-Command", script], env={**os.environ, "CL_PROFILE": profile},
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        else:
+            subprocess.run(["pkill", "-f", "--", f"--user-data-dir={profile}"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    except Exception as exc:
+        print(f"(could not stop it automatically: {exc})")
+    wait_for_chrome_gone(10)
+
+
 class BmwSession:
     """
     One Chrome window reused for any number of VIN lookups.
@@ -215,8 +273,23 @@ class BmwSession:
 
     def _launch(self) -> None:
         try:
+            if _chrome_answering():
+                # Something already owns the debugging port: a Chrome left over from an
+                # earlier run. A new Chrome would just hand over to it (ignoring
+                # --headless / window settings), so clear it out first.
+                stop_profile_chrome()
+                if _chrome_answering():
+                    raise RuntimeError(
+                        f"Another program is already using the debugging port {CDP_PORT}, and it is not "
+                        f"a Chrome using {CHROME_PROFILE}. Close it or set CDP_PORT to another number.")
             self._chrome = start_chrome(self.headless)
             wait_for_chrome()
+            time.sleep(1)
+            if self._chrome.poll() is not None:
+                raise RuntimeError(
+                    "Chrome handed over to a Chrome that was already running with the same profile "
+                    f"({CHROME_PROFILE}), so the requested window mode was ignored. Close every "
+                    "Chrome window that uses that profile and try again.")
 
             print("Connecting Playwright to Chrome...")
             self._playwright = sync_playwright().start()
@@ -237,7 +310,12 @@ class BmwSession:
         """Close Chrome and start it again with or without a visible window. The
         profile (cookies, visitor id) is the same, so sites see the same browser."""
         self.close()
-        time.sleep(1)                      # let the old Chrome release the profile
+        if not wait_for_chrome_gone(2):
+            stop_profile_chrome()
+        if _chrome_answering():
+            raise RuntimeError("The previous Chrome is still running, so it can't be reopened "
+                               f"{'hidden' if headless else 'with a window'}. Close all Chrome windows "
+                               f"that use the profile {CHROME_PROFILE}.")
         self.headless = headless
         self._launch()
 
@@ -256,12 +334,8 @@ class BmwSession:
             except Exception:
                 pass
         if self._chrome is not None:
-            # Shut down the Chrome process that Python started.
-            self._chrome.terminate()
-            try:
-                self._chrome.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._chrome.kill()
+            _stop_chrome(self._chrome)
+            wait_for_chrome_gone()
         self._chrome = self._playwright = self._browser = self.page = None
 
     def snapshot(self, tag: str) -> dict:

@@ -8,6 +8,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   rows: [],
   jobs: {},                 // vin -> {state, message}
+  pinned: new Set(),        // VINs fetched this visit: stay visible under "Without options" until a filter changes
   companion: { ok: false, busy: false, blocked: 0 },
 };
 
@@ -103,6 +104,7 @@ async function trackJob(vin) {
       const res = await companion(`/job?vin=${encodeURIComponent(vin)}`);
       const job = await res.json();
       if (job.state === "done") {
+        state.pinned.add(vin);
         setJob(vin, "done", job.message || "Options fetched.");
         return refreshRow(vin);
       }
@@ -137,7 +139,7 @@ function filtered() {
     if (pMax != null && !(r.price != null && r.price <= pMax)) return false;
     if (mMax != null && !(r.mileage != null && r.mileage <= mMax)) return false;
     if (has === "with" && !hasOptions(r)) return false;
-    if (has === "without" && hasOptions(r)) return false;
+    if (has === "without" && hasOptions(r) && !state.pinned.has(r.vin)) return false;
     if (q.length) {
       const hay = `${r.title || ""} ${r.vin || ""} ${r.location || ""}`.toLowerCase();
       if (!q.every((t) => hay.includes(t))) return false;
@@ -184,7 +186,7 @@ function optionsBlock(r, ts) {
     const [code, ...rest] = o.split(" ");
     return `<li><b>${highlight(code, ts)}</b>${highlight(rest.join(" "), ts)}</li>`;
   }).join("");
-  return `<details class="opts" ${ts.length ? "open" : ""}><summary>${r.options.length} factory options</summary><ul>${items}</ul></details>`;
+  return `<details class="opts" ${ts.length || state.pinned.has(r.vin) ? "open" : ""}><summary>${r.options.length} factory options</summary><ul>${items}</ul></details>`;
 }
 
 function actionArea(r) {
@@ -231,10 +233,12 @@ function render() {
 
 // ---------------------------------------------------------------- start
 function wire() {
-  for (const id of ["f-search", "f-options", "f-year-min", "f-year-max", "f-price-max", "f-miles-max"]) $(id).addEventListener("input", render);
-  for (const id of ["f-has", "f-sort"]) $(id).addEventListener("change", render);
-  for (const id of ["f-make", "f-model", "f-trim"]) $(id).addEventListener("change", () => { fillSelects(); render(); });
+  const changed = () => { state.pinned.clear(); render(); };   // a filter edit ends the "keep it visible" grace
+  for (const id of ["f-search", "f-options", "f-year-min", "f-year-max", "f-price-max", "f-miles-max"]) $(id).addEventListener("input", changed);
+  for (const id of ["f-has", "f-sort"]) $(id).addEventListener("change", changed);
+  for (const id of ["f-make", "f-model", "f-trim"]) $(id).addEventListener("change", () => { fillSelects(); changed(); });
   $("f-reset").addEventListener("click", () => {
+    state.pinned.clear();
     for (const el of document.querySelectorAll(".filters input, .filters select")) el.value = "";
     $("f-sort").value = "new"; fillSelects(); render();
   });
