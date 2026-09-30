@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Car Lister</title>
+  <meta name="description" content="Browse car listings with factory options.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <h1 id="site-title">Car Lister</h1>
+      <button id="companion-pill" class="pill" type="button" aria-haspopup="dialog">
+        <span class="dot"></span><span id="companion-text">Checking companion…</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="filters" aria-label="Filters">
+      <input id="f-search" type="search" placeholder="Search title, VIN or location" aria-label="Search">
+      <input id="f-options" type="search" placeholder="Has option… (e.g. carbon, 2T4, head-up)" aria-label="Option search">
+      <select id="f-make" aria-label="Make"><option value="">All makes</option></select>
+      <select id="f-model" aria-label="Model"><option value="">All models</option></select>
+      <select id="f-trim" aria-label="Trim"><option value="">All trims</option></select>
+      <input id="f-year-min" type="number" placeholder="Year from" min="1980" max="2100" aria-label="Year from">
+      <input id="f-year-max" type="number" placeholder="Year to" min="1980" max="2100" aria-label="Year to">
+      <input id="f-price-max" type="number" placeholder="Max price" min="0" step="1000" aria-label="Max price">
+      <input id="f-miles-max" type="number" placeholder="Max mileage" min="0" step="1000" aria-label="Max mileage">
+      <select id="f-has" aria-label="Options status">
+        <option value="">Options: any</option>
+        <option value="with">With options</option>
+        <option value="without">Without options</option>
+      </select>
+      <select id="f-sort" aria-label="Sort">
+        <option value="new">Newest first</option>
+        <option value="price-asc">Price: low to high</option>
+        <option value="price-desc">Price: high to low</option>
+        <option value="miles-asc">Mileage: low to high</option>
+        <option value="year-desc">Year: newest</option>
+      </select>
+      <button id="f-reset" type="button" class="ghost">Reset</button>
+    </section>
+
+    <p id="count" class="count" role="status" aria-live="polite"></p>
+    <section id="grid" class="grid" aria-label="Listings"></section>
+    <p id="empty" class="empty" hidden>No listings match these filters.</p>
+    <p id="error" class="error" hidden></p>
+  </main>
+
+  <dialog id="companion-dialog">
+    <form method="dialog">
+      <h2>Fetch options on your computer</h2>
+      <p>The <strong>Fetch options</strong> button looks a VIN up on bimmer.work from <em>your</em> computer
+         and network, then shares the result here. That needs a small helper app running on your machine.</p>
+      <ol>
+        <li>Install <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python</a> and Google Chrome, then download the project.</li>
+        <li>Put your project URL and <em>anon</em> key in a <code>.env</code> file.</li>
+        <li>Start the helper and leave it running:
+          <pre id="companion-cmd"></pre></li>
+        <li>Come back to this page — the top-right badge turns green.</li>
+      </ol>
+      <p class="muted">Works in Chrome, Edge and Firefox. Safari blocks pages from talking to local apps.</p>
+      <button class="primary" value="close">Got it</button>
+    </form>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
