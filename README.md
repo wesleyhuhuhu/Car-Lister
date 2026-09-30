@@ -169,3 +169,8 @@ If bimmer.work blocks a lookup (HTTP 429, or no VIN box / Submit button), the lo
 - A VIN that bimmer.work simply doesn't know, or a timeout after submitting, does **not** trigger the fallback (it would waste one of the 2 checks).
 - Turn it off with `--no-fallback` (all lookup scripts) or `OEM_FALLBACK=0`.
 - This site lists options with a leading zero (`0248`, `01CB`); they are converted to bimmer.work's style (`248`, `1CB`). Option wording differs slightly between the sites.
+
+
+
+https://github.com/user-attachments/assets/93a594d0-1744-4c81-9220-b589e738dd90
+
