@@ -8,8 +8,8 @@ box). The site allows about 2 free lookups per day per visitor, so:
     were tried per UTC day. It is information only and never blocks a lookup;
     the site itself enforces the limit and its message is reported as-is, and
   * if the site shows a human check (Cloudflare Turnstile) it is NOT bypassed:
-    a visible browser window lets the person click it; a hidden one gives up
-    with a message saying to run with --show-browser.
+    a hidden Chrome is closed and reopened with a visible window so the person
+    can click it, then hidden again once the lookup is done.
 
 The result is converted into the same "build sheet" shape bimmer.work produces
 ({"Options": {"248": "Steering wheel heater", ...}, "Color": ..., ...}) so the
@@ -34,7 +34,7 @@ USAGE_FILE = Path(os.environ.get("OEM_USAGE_FILE", str(Path.home() / ".car-liste
 SOURCE = "oemnavigations.com"
 
 RESULT_WAIT_SECONDS = 90          # the site answers via a websocket message; its own timeout is 60s
-CAPTCHA_WAIT_SECONDS = 60         # how long a person (or an automatic pass) gets to clear the check
+CAPTCHA_WAIT_SECONDS = 120        # how long a person gets to click the human check in a visible window
 
 
 class OemLimitReached(RuntimeError):
@@ -174,9 +174,39 @@ def _page_state(page) -> tuple[str, str]:
     )
 
 
+class _NeedsVisibleWindow(Exception):
+    pass
+
+
 def lookup(session, vin: str) -> dict:
     """Run one lookup on oemnavigations.com using the session's browser page.
+    If the site shows a human check while Chrome is hidden, Chrome is reopened with a
+    visible window so the person can click it, then the lookup is repeated (the check
+    appears before the VIN is accepted, so this doesn't cost an extra free check), and
+    the window is hidden again afterwards.
     Returns a build sheet; raises OemLimitReached / RuntimeError."""
+    was_headless = session.headless
+    try:
+        try:
+            return _lookup(session, vin)
+        except _NeedsVisibleWindow:
+            print("oemnavigations.com wants a human check: reopening Chrome with a visible window. "
+                  "Please tick the box in that window.")
+            try:
+                session.reopen(headless=False)
+            except Exception as exc:
+                raise RuntimeError(f"oemnavigations.com wants a human check and Chrome could not be opened "
+                                   f"with a visible window: {exc}")
+            return _lookup(session, vin)
+    finally:
+        if was_headless and not session.headless:
+            try:
+                session.reopen(headless=True)
+            except Exception as exc:
+                print(f"(could not hide Chrome again: {exc})")
+
+
+def _lookup(session, vin: str) -> dict:
     page = session.page
     print(f"Trying fallback site {OEM_URL} ...")
     response = page.goto(OEM_URL, wait_until="domcontentloaded")
@@ -194,7 +224,6 @@ def lookup(session, vin: str) -> dict:
     except PlaywrightTimeoutError:
         raise RuntimeError(session._describe_missing_form(vin, "The oemnavigations.com VIN form did not appear."))
 
-    record_use()  # count the attempt: the site counts it as soon as it accepts the VIN
     deadline = time.time() + RESULT_WAIT_SECONDS
     captcha_deadline = None
     while time.time() < deadline:
@@ -207,19 +236,19 @@ def lookup(session, vin: str) -> dict:
                 raise OemLimitReached(f"oemnavigations.com: {text}")
             raise RuntimeError(f"oemnavigations.com: {text}")
         if state == "captcha":
+            if session.headless:
+                raise _NeedsVisibleWindow()
             if captcha_deadline is None:
                 captcha_deadline = time.time() + CAPTCHA_WAIT_SECONDS
-                where = "Please tick it in the browser window." if not session.headless else \
-                    "It may clear by itself; a hidden window cannot be clicked."
-                print(f"oemnavigations.com is showing a human check. {where}")
+                print("oemnavigations.com is showing a human check. Please tick it in the browser window.")
             if time.time() > captcha_deadline:
                 raise RuntimeError(session._describe_missing_form(
-                    vin, "oemnavigations.com is asking for a human check that was not completed"
-                         + (" (run with --show-browser to click it yourself)." if session.headless else ".")))
+                    vin, "oemnavigations.com's human check was not completed in time."))
         page.wait_for_timeout(500)
     else:
         raise RuntimeError(session._describe_missing_form(vin, "oemnavigations.com gave no answer in time."))
 
+    record_use()
     sheet = to_build_sheet(parse_result(page))
     print(f"Fallback lookup successful ({len(sheet['Options'])} options).")
     return sheet

@@ -213,7 +213,7 @@ class BmwSession:
         self._browser = None
         self.page = None
 
-    def __enter__(self) -> "BmwSession":
+    def _launch(self) -> None:
         try:
             self._chrome = start_chrome(self.headless)
             wait_for_chrome()
@@ -228,7 +228,18 @@ class BmwSession:
         except BaseException:
             self.close()
             raise
+
+    def __enter__(self) -> "BmwSession":
+        self._launch()
         return self
+
+    def reopen(self, headless: bool) -> None:
+        """Close Chrome and start it again with or without a visible window. The
+        profile (cookies, visitor id) is the same, so sites see the same browser."""
+        self.close()
+        time.sleep(1)                      # let the old Chrome release the profile
+        self.headless = headless
+        self._launch()
 
     def __exit__(self, *exc_info) -> None:
         self.close()
