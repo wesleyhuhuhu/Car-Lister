@@ -34,7 +34,7 @@ USAGE_FILE = Path(os.environ.get("OEM_USAGE_FILE", str(Path.home() / ".car-liste
 SOURCE = "oemnavigations.com"
 
 RESULT_WAIT_SECONDS = 90          # the site answers via a websocket message; its own timeout is 60s
-CAPTCHA_WAIT_SECONDS = 120        # how long a person gets to click the human check in a visible window
+CAPTCHA_WAIT_SECONDS = 75         # how long a person gets to click the human check in a visible window
 
 
 class OemLimitReached(RuntimeError):
@@ -240,10 +240,13 @@ def _lookup(session, vin: str) -> dict:
                 raise _NeedsVisibleWindow()
             if captcha_deadline is None:
                 captcha_deadline = time.time() + CAPTCHA_WAIT_SECONDS
+                deadline = max(deadline, captcha_deadline + 15)     # the check gets its full time
                 print("oemnavigations.com is showing a human check. Please tick it in the browser window.")
             if time.time() > captcha_deadline:
                 raise RuntimeError(session._describe_missing_form(
-                    vin, "oemnavigations.com's human check was not completed in time."))
+                    vin, "oemnavigations.com's human check did not complete. It often fails to load or verify in an "
+                         "automated browser, and this VIN cannot be checked until it does. If opening the site by hand "
+                         "says the 2 daily checks are used up, that limit is the real reason; try again after it resets."))
         page.wait_for_timeout(500)
     else:
         raise RuntimeError(session._describe_missing_form(vin, "oemnavigations.com gave no answer in time."))

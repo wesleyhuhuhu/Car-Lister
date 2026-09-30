@@ -4,6 +4,7 @@
 export const CONFIG = {
   SUPABASE_URL: "https://grhpcdbwnczekgfnsumo.supabase.co",
   SUPABASE_ANON_KEY: "sb_publishable_1IYS8llt7KUrvvhDm8ufpA_oIhkCCaY",
+  REPO_URL: "https://github.com/wesleyhuhuhu/Car-Lister",
   COMPANION_URL: "http://127.0.0.1:8765",
   SITE_TITLE: "Wesley's Amazing Car Site With OPTIONS",
 };

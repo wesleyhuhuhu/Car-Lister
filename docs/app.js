@@ -118,6 +118,8 @@ async function trackJob(vin) {
 }
 
 function openCompanionDialog() {
+  const repo = (CONFIG.REPO_URL || "https://github.com/wesleyhuhuhu/Car-Lister").replace(/\/$/, "");
+  $("companion-clone").textContent = `git clone ${repo}.git\ncd ${repo.split("/").pop()}`;
   $("companion-cmd").textContent = `python companion.py --allow-origin ${location.origin}`;
   $("companion-dialog").showModal();
 }

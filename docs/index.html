@@ -52,14 +52,22 @@
   <dialog id="companion-dialog">
     <form method="dialog">
       <h2>Fetch options on your computer</h2>
-      <p>The <strong>Fetch options</strong> button looks a VIN up on bimmer.work from <em>your</em> computer
-         and network, then shares the result here. That needs a small helper app running on your machine.</p>
+      <p>The <strong>Fetch options</strong> button looks a VIN up from <em>your</em> computer and network,
+         then shares the result here. That needs a small helper app running on your machine.
+         The project already includes the settings it needs, so there is nothing to configure.</p>
       <ol>
-        <li>Install <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python</a> and Google Chrome, then download the project.</li>
-        <li>Put your project URL and <em>anon</em> key in a <code>.env</code> file.</li>
+        <li>Install <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python</a>,
+            <a href="https://git-scm.com/downloads" target="_blank" rel="noopener">Git</a> and Google Chrome.</li>
+        <li>Clone the project (in PowerShell or a terminal):
+          <pre id="companion-clone"></pre></li>
+        <li>Create a Python environment and install what it needs:
+          <pre>python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install requests playwright truststore</pre>
+          <span class="muted">macOS / Linux: use <code>source .venv/bin/activate</code> instead of the second line.</span></li>
         <li>Start the helper and leave it running:
           <pre id="companion-cmd"></pre></li>
-        <li>Come back to this page — the top-right badge turns green.</li>
+        <li>Come back to this page. The badge at the top right turns green, and Fetch options will work.</li>
       </ol>
       <p class="muted">Works in Chrome, Edge and Firefox. Safari blocks pages from talking to local apps.</p>
       <button class="primary" value="close">Got it</button>
