@@ -10,8 +10,12 @@ Never raises: if the database can't be reached, a warning is printed and the
 script carries on (the local files are already saved). Run db_sync_https.py
 later to catch the database up.
 
-Needs SUPABASE_URL and SUPABASE_SERVICE_KEY (environment or .env file). With
-neither set, database pushing is simply off.
+Two ways to be allowed to push (environment or .env file):
+  * owner:        SUPABASE_URL + SUPABASE_SERVICE_KEY  -> direct upsert into the table
+  * contributor:  SUPABASE_URL + SUPABASE_ANON_KEY     -> the submit_listings database
+                  function (adds new listings, refreshes price/mileage of known ones,
+                  never touches options; options found by lookups go through submit_options)
+With neither set, database pushing is simply off.
 """
 import json
 import os
@@ -45,6 +49,10 @@ def read_env(name: str) -> str | None:
 
 
 def db_configured() -> bool:
+    return bool(read_env("SUPABASE_URL") and (read_env("SUPABASE_SERVICE_KEY") or read_env("SUPABASE_ANON_KEY")))
+
+
+def is_owner() -> bool:
     return bool(read_env("SUPABASE_URL") and read_env("SUPABASE_SERVICE_KEY"))
 
 
@@ -71,14 +79,58 @@ def _headers(key: str) -> dict:
     return h
 
 
-def push_rows(rows: list[dict], batch_size: int = 100, quiet: bool = False) -> bool:
+CONTRIBUTOR_BATCH = 200           # listings per submit_listings call (the database accepts up to 500)
+LISTING_FIELDS = ("title", "vin", "year", "make", "model", "trim", "price", "price_text", "mileage",
+                  "mileage_text", "source_site", "location", "listing_url", "image_url")
+
+
+def _rpc(base: str, key: str, name: str, args: dict):
+    resp = requests.post(f"{base.rstrip('/')}/rest/v1/rpc/{name}", json=args, headers=_headers(key), timeout=60)
+    if resp.status_code >= 300:
+        raise RuntimeError(f"{name} failed ({resp.status_code}): {resp.text[:300]}")
+    return resp.json() if resp.text else None
+
+
+def push_rows_as_contributor(rows: list[dict], send_options: bool = False, quiet: bool = False) -> bool:
+    """Push with the public anon key through submit_listings (and, when send_options is
+    set, submit_options for rows that carry a looked-up build sheet)."""
+    base, key = read_env("SUPABASE_URL"), read_env("SUPABASE_ANON_KEY")
+    params = [to_params(r) for r in rows]
+    payloads = [{k: p[k] for k in LISTING_FIELDS if p.get(k) not in (None, "")} for p in params]
+    totals = {"inserted": 0, "updated": 0, "skipped": 0}
+    try:
+        for i in range(0, len(payloads), CONTRIBUTOR_BATCH):
+            chunk = payloads[i:i + CONTRIBUTOR_BATCH]
+            res = _rpc(base, key, "submit_listings", {"p_rows": chunk})
+            res = res[0] if isinstance(res, list) and res else (res or {})
+            for k in totals:
+                totals[k] += int(res.get(k, 0) or 0)
+            if not quiet and len(payloads) > CONTRIBUTOR_BATCH:
+                print(f"  database: {min(i + CONTRIBUTOR_BATCH, len(payloads))}/{len(payloads)} sent", flush=True)
+        if send_options:
+            for p in params:
+                if p["build_sheet"] and p["vin"]:
+                    _rpc(base, key, "submit_options", {"p_vin": p["vin"], "p_build_sheet": json.loads(p["build_sheet"])})
+    except (requests.RequestException, RuntimeError) as exc:
+        print(f"  database push failed: {exc.__class__.__name__}: {exc}")
+        return False
+    if not quiet:
+        print(f"  database: {totals['inserted']} new, {totals['updated']} refreshed, {totals['skipped']} skipped")
+    return True
+
+
+def push_rows(rows: list[dict], batch_size: int = 100, quiet: bool = False, send_options: bool = False) -> bool:
     """Upsert listing rows (as saved in listings.json) into the database.
-    Returns True on success, False (after printing a warning) on any failure."""
+    Returns True on success, False (after printing a warning) on any failure.
+    With only the anon key this goes through submit_listings; send_options=True also
+    submits looked-up options (used right after a lookup, not for bulk re-syncs)."""
     if not rows:
         return True
     base, key = read_env("SUPABASE_URL"), read_env("SUPABASE_SERVICE_KEY")
+    if base and not key and read_env("SUPABASE_ANON_KEY"):
+        return push_rows_as_contributor(rows, send_options=send_options, quiet=quiet)
     if not base or not key:
-        print("  database not configured (SUPABASE_URL / SUPABASE_SERVICE_KEY): skipped")
+        print("  database not configured (SUPABASE_URL plus SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY): skipped")
         return False
     endpoint = base.rstrip("/") + "/rest/v1/listings?on_conflict=listing_key"
 

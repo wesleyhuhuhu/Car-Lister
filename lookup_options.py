@@ -81,7 +81,7 @@ def lookup_vins(rows, targets, out_prefix: str, delay: float, max_failures: int,
             saved += 1
             print(f"  saved {len(row['options'])} options")
             if db_ok:
-                db_ok = push_rows([row], quiet=True)
+                db_ok = push_rows([row], quiet=True, send_options=True)
                 if db_ok:
                     print("  database updated")
                 else:

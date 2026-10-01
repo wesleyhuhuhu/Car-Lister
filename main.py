@@ -164,7 +164,7 @@ def main():
         if not push_rows(merged_rows):
             print("Database not updated; the local files are saved. Run db_sync_https.py later to catch up.")
     else:
-        print("Online database not configured (SUPABASE_URL / SUPABASE_SERVICE_KEY): skipped.")
+        print("Online database not configured (SUPABASE_URL plus SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY): skipped.")
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ def main():
     if args.dry_run:
         return
     if not db_configured():
-        sys.exit("Set SUPABASE_URL and SUPABASE_SERVICE_KEY (environment or .env). See the top of this file.")
+        sys.exit("Set SUPABASE_URL and SUPABASE_SERVICE_KEY, or SUPABASE_ANON_KEY to contribute (environment or .env). See the top of this file.")
     if not push_rows(rows, batch_size=args.batch_size):
         sys.exit(1)
     print("Synced.")
