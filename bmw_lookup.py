@@ -66,6 +66,24 @@ def default_profile_dir() -> Path:
 CHROME_PATH = find_chrome()
 CHROME_PROFILE = default_profile_dir()
 
+
+def default_template_dir() -> Path | None:
+    """A prepared Chrome profile whose contents are copied into the automation profile each time it
+    is reset: %LOCALAPPDATA%/Chrome Temp when that folder exists. Set CHROME_PROFILE_TEMPLATE to use
+    another folder, or to "none" to start from an empty profile instead."""
+    override = os.environ.get("CHROME_PROFILE_TEMPLATE")
+    if override is not None:
+        override = override.strip()
+        return None if override.lower() in ("", "0", "none", "off") else Path(override)
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    candidate = Path(local_app_data) / "Chrome Temp" if local_app_data else Path.home() / ".car-lister" / "chrome-template"
+    return candidate if candidate.is_dir() else None
+
+
+PROFILE_TEMPLATE = default_template_dir()
+# Chrome's "this profile is open" markers: copying them would make the new Chrome think it is already running.
+TEMPLATE_SKIP = {"lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket", "RunningChromeVersion"}
+
 BMW_URL = os.environ.get("BMW_URL", "https://bimmer.work/")
 # Set BMW_HEADLESS=1 to run Chrome without a visible window. Some sites treat
 # headless browsers differently and a human check can't be clicked in one, so
@@ -285,6 +303,37 @@ def wipe_profile() -> None:
                        f"{', '.join(p.name for p in leftover[:5])}. Close any Chrome using it and try again.")
 
 
+def seed_profile() -> None:
+    """Copy the template profile's contents (see PROFILE_TEMPLATE) into the automation profile.
+    The template is only read, never changed."""
+    if PROFILE_TEMPLATE is None:
+        return
+    src, dst = PROFILE_TEMPLATE.resolve(), CHROME_PROFILE.resolve()
+    if not src.is_dir():
+        raise RuntimeError(f"The Chrome profile template {src} doesn't exist. Fix CHROME_PROFILE_TEMPLATE, "
+                           f"or set it to none to start from an empty profile.")
+    if src == dst or src in dst.parents or dst in src.parents:
+        raise RuntimeError(f"The profile template {src} and the automation profile {dst} must be separate folders.")
+    print(f"Copying the Chrome profile template {src} into {dst} ...")
+    try:
+        shutil.copytree(src, dst, dirs_exist_ok=True,
+                        ignore=lambda _dir, names: [n for n in names if n in TEMPLATE_SKIP])
+    except shutil.Error as exc:
+        failed = [str(item[0]) for item in (exc.args[0] if exc.args and isinstance(exc.args[0], list) else [])][:3]
+        raise RuntimeError(f"Could not copy the profile template {src}: {failed or exc}. "
+                           f"If a Chrome window is using {src.name}, close it and try again.")
+
+
+def reset_profile() -> None:
+    """Empty the automation profile, then fill it from the template (if there is one)."""
+    wipe_profile()
+    seed_profile()
+
+
+def _profile_is_empty() -> bool:
+    return not CHROME_PROFILE.exists() or not any(CHROME_PROFILE.iterdir())
+
+
 class BmwSession:
     """
     One Chrome window reused for any number of VIN lookups.
@@ -348,17 +397,20 @@ class BmwSession:
 
     def __enter__(self) -> "BmwSession":
         if self.fresh_profile:
-            wipe_profile()
+            reset_profile()
+        elif PROFILE_TEMPLATE is not None and _profile_is_empty():
+            seed_profile()                         # --keep-profile: fill it from the template once
         self._launch()
         return self
 
     def _restart_with_empty_profile(self) -> None:
-        """Close Chrome, empty the profile and start Chrome again (same window mode)."""
-        print(f"Emptying the Chrome profile {CHROME_PROFILE} for this VIN...")
+        """Close Chrome, reset the profile (empty it, copy the template in) and start Chrome again."""
+        what = f"from {PROFILE_TEMPLATE.name}" if PROFILE_TEMPLATE is not None else "to empty"
+        print(f"Resetting the Chrome profile {CHROME_PROFILE} {what} for this VIN...")
         self.close()
         if not wait_for_chrome_gone(5):
             stop_profile_chrome()
-        wipe_profile()
+        reset_profile()
         self._launch()
 
     def reopen(self, headless: bool) -> None:

@@ -74,6 +74,11 @@ It is emptied before every VIN (Chrome is closed, the folder's contents deleted,
 from the same clean state. `--keep-profile` (or `CHROME_FRESH_PROFILE=0`) keeps it between VINs. Only a folder named
 `ChromeAutomation`, `ChromeProfile` or `chrome-profile` is ever emptied. The delay between lookups and the pause after failures stay as they are.
 
+**Profile template.** If `%LOCALAPPDATA%\Chrome Temp` exists, every reset copies its contents into `ChromeAutomation` after emptying it,
+so each VIN starts from that prepared profile instead of a blank one (about 2 s per VIN). `Chrome Temp` is only read, never changed;
+close any Chrome window using it while lookups run. Use another folder with `CHROME_PROFILE_TEMPLATE=<path>`, or
+`CHROME_PROFILE_TEMPLATE=none` for a blank profile. With `--keep-profile` the template is copied in once, when `ChromeAutomation` is empty.
+
 
 ```bash
 python lookup_matching.py --dry-run          # just list what would be looked up

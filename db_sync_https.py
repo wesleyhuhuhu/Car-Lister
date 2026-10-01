@@ -15,6 +15,12 @@ One-time setup:
 Usage:
   python db_sync_https.py            # sync listings.json
   python db_sync_https.py --dry-run
+  python db_sync_https.py --with-options                 # also send looked-up options (needed with only the anon key)
+  python db_sync_https.py --with-options --vin WB523...  # just these VINs, e.g. after stopping a lookup run
+
+With the secret key, options are part of every sync. With only the public anon key, listings go through
+submit_listings and options only with --with-options (through submit_options, which never overwrites a VIN
+that already has options).
 """
 import argparse
 import sys
@@ -29,18 +35,31 @@ def main():
     parser.add_argument("--json", default="listings.json")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--with-options", action="store_true",
+                        help="Also send looked-up options when using the anon key (the secret key always sends them)")
+    parser.add_argument("--vin", nargs="+", default=None, help="Only these VINs")
     args = parser.parse_args()
 
     rows = load_rows(args.json)
     if not rows:
         sys.exit(f"No listings found in {args.json}.")
+    if args.vin:
+        wanted = {v.strip().upper() for v in args.vin}
+        rows = [r for r in rows if (r.get("vin") or "").strip().upper() in wanted]
+        missing = wanted - {(r.get("vin") or "").strip().upper() for r in rows}
+        if missing:
+            print(f"Not in {args.json}: {', '.join(sorted(missing))}")
+        if not rows:
+            sys.exit(1)
     with_lookup = sum(1 for r in rows if to_payload(to_params(r)).get("build_sheet"))
     print(f"{len(rows)} listings: {with_lookup} with options lookup, {len(rows) - with_lookup} without")
     if args.dry_run:
         return
     if not db_configured():
         sys.exit("Set SUPABASE_URL and SUPABASE_SERVICE_KEY, or SUPABASE_ANON_KEY to contribute (environment or .env). See the top of this file.")
-    if not push_rows(rows, batch_size=args.batch_size):
+    if args.with_options and not args.vin and with_lookup > 50:
+        print(f"Sending options for {with_lookup} listings one at a time; VINs the database already has are left as they are.")
+    if not push_rows(rows, batch_size=args.batch_size, send_options=args.with_options):
         sys.exit(1)
     print("Synced.")
 

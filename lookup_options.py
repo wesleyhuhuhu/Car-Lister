@@ -86,7 +86,7 @@ def lookup_vins(rows, targets, out_prefix: str, delay: float, max_failures: int,
                     print("  database updated")
                 else:
                     print("  Database push failed; no more pushes this run. "
-                          "Run db_sync_https.py later to catch up.")
+                          "Run 'python db_sync_https.py --with-options' later to catch up.")
 
     if not stopped_early:
         remaining = failed
