@@ -11,23 +11,15 @@ const state = {
   jobs: {},                 // vin -> {state, message}
   pinned: new Set(),        // VINs fetched this visit: stay visible under "Without options" until a filter changes
   companion: { ok: false, busy: false, blocked: 0 },
-  db: [],                   // rows from the shared database
-  local: loadLocal(),       // rows found by this browser's own searches (and options fetched through the extension)
   ext: null,                // {version, adapters} when the helper extension is installed
 };
 
-function loadLocal() {
-  try { return JSON.parse(localStorage.getItem("carlister.local") || "[]"); } catch { return []; }
-}
-function saveLocal() {
-  try { localStorage.setItem("carlister.local", JSON.stringify(state.local)); } catch { /* storage full or blocked: keep in memory */ }
-}
-// Database rows win; a local row only fills in what the database does not have yet.
-function mergeRows() {
-  const byVin = new Map(state.db.filter((r) => r.vin).map((r) => [r.vin, r]));
-  const extra = state.local.filter((r) => !(r.vin && byVin.has(r.vin) && hasOptions(byVin.get(r.vin))));
-  state.rows = [...state.db.filter((r) => !extra.some((l) => l.vin && l.vin === r.vin)), ...extra];
-}
+// The shared database is the only source of listings: searches and fetched options are saved there and the
+// page re-reads it, so every visitor sees the same rows. Earlier versions kept copies in localStorage; clear them.
+try { localStorage.removeItem("carlister.local"); localStorage.removeItem("carlister.worker"); } catch { /* storage blocked */ }
+
+// Name used for VIN claims during this visit (like companion.py's computer name). Claims expire after 30 minutes.
+const WORKER = "web-" + Math.random().toString(36).slice(2, 10);
 
 // ---------------------------------------------------------------- helpers
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -60,15 +52,6 @@ async function rpc(name, args) {
   return res.json();
 }
 
-// A stable name for this browser, used for VIN claims (like companion.py's computer name).
-function workerName() {
-  try {
-    let w = localStorage.getItem("carlister.worker");
-    if (!w) { w = "web-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("carlister.worker", w); }
-    return w;
-  } catch { return "web-anonymous"; }
-}
-
 async function loadAll() {
   const rows = [];
   for (let from = 0; ; from += PAGE) {
@@ -83,9 +66,8 @@ async function refreshRow(vin) {
   try {
     const [fresh] = await dbGet(`select=${COLUMNS}&vin=eq.${encodeURIComponent(vin)}`);
     if (!fresh) return;
-    const i = state.db.findIndex((r) => r.vin === vin);
-    if (i >= 0) state.db[i] = fresh;
-    mergeRows();
+    const i = state.rows.findIndex((r) => r.vin === vin);
+    if (i >= 0) state.rows[i] = fresh; else state.rows.push(fresh);
     render();
   } catch { /* leave the card as it is */ }
 }
@@ -114,30 +96,18 @@ async function runSearch(e) {
   const go = $("s-go"), status = $("s-status");
   go.disabled = true; status.textContent = "Starting…";
   try {
-    const share = $("s-share").checked;
     const { listings: found, upload } = await ext.runJob("search", { params: {
-      share,
+      share: true,
       make: $("s-make").value.trim(), model: $("s-model").value.trim(), zip: $("s-zip").value.trim(), radius: $("s-radius").value,
       minyear: num("s-minyear"), maxyear: num("s-maxyear"), maxprice: num("s-maxprice"),
     } }, (m) => { status.textContent = m; });
-    const now = new Date().toISOString();
-    const known = new Map(state.local.map((r) => [r.listing_key, r]));
-    for (const l of found) {
-      const old = known.get(l.listing_key);
-      known.set(l.listing_key, { ...l, updated_at: now, ...(old && hasOptions(old) ? { options: old.options, option_codes: old.option_codes, build_sheet: old.build_sheet } : {}) });
-    }
-    state.local = [...known.values()];
-    saveLocal(); mergeRows(); fillSelects(); render();
-    let msg = `Found ${found.length} listings (${state.local.length} saved on this device).`;
-    if (upload) {
-      if (upload.error) msg += ` Could not add them to the database: ${upload.error}`;
-      else {
-        msg += ` Database: ${upload.inserted} new, ${upload.updated} refreshed` + (upload.rejected
-          ? `, ${upload.rejected} not accepted (${Object.entries(upload.reasons).map(([k, v]) => `${k} x${v}`).join(", ")})` : "") + ".";
-        if (upload.inserted || upload.updated) {
-          try { state.db = await loadAll(); mergeRows(); fillSelects(); render(); } catch { /* the page keeps what it has */ }
-        }
-      }
+    let msg = `Found ${found.length} listings.`;
+    if (!upload || upload.error) {
+      msg += ` They could not be saved to the database, so they are not shown: ${(upload && upload.error) || "no answer"}. Try the search again.`;
+    } else {
+      msg += ` Database: ${upload.inserted} new, ${upload.updated} refreshed` + (upload.rejected
+        ? `, ${upload.rejected} not accepted (${Object.entries(upload.reasons).map(([k, v]) => `${k} x${v}`).join(", ")})` : "") + ".";
+      try { state.rows = await loadAll(); fillSelects(); render(); } catch (err) { msg += ` Reload the page to see them (${err.message}).`; }
     }
     status.textContent = msg;
   } catch (err) {
@@ -152,31 +122,31 @@ async function fetchOptionsExt(r) {
   setJob(r.vin, "running", "Sending to the extension…");
   // Like companion.py: claim a BMW VIN that is in the shared database so two people don't look it up at once.
   let claimed = false;
-  if (isBmw(r) && state.db.some((d) => d.vin === r.vin)) {
+  if (isBmw(r) && state.rows.some((d) => d.vin === r.vin)) {
     try {
-      claimed = await rpc("claim_vin", { p_worker: workerName(), p_vin: r.vin });
+      claimed = await rpc("claim_vin", { p_worker: WORKER, p_vin: r.vin });
       if (!claimed) { setJob(r.vin, "failed", "Someone else is fetching this VIN, or it already has options."); return refreshRow(r.vin); }
     } catch { /* database unreachable: look it up anyway; the first saved result wins */ }
   }
   try {
     const listing = { title: r.title, price: r.price, price_text: r.price_text, mileage: r.mileage, mileage_text: r.mileage_text,
       source_site: r.source_site, location: r.location, listing_url: r.listing_url, image_url: r.image_url };
-    const res = await ext.runJob("fetchOptions", { vin: r.vin, make: r.make, listing, share: $("s-share").checked },
+    const res = await ext.runJob("fetchOptions", { vin: r.vin, make: r.make, listing, share: true },
       (m) => setJob(r.vin, "running", m));
-    const i = state.local.findIndex((l) => l.vin === r.vin);
-    const patch = { options: res.options, option_codes: res.option_codes, build_sheet: res.build_sheet, options_checked_at: new Date().toISOString() };
-    if (i >= 0) state.local[i] = { ...state.local[i], ...patch };
-    else state.local.push({ ...r, ...patch, local: true });
-    saveLocal(); state.pinned.add(r.vin); mergeRows();
-    const up = res.upload;
-    const note = !up ? "" : up.stored ? " Added to the database." : up.error ? ` Not added to the database: ${up.error}`
-      : up.reason === "already_has_options_or_not_in_database" ? " The database already has options for this car." : ` Not added to the database (${up.reason}).`;
-    setJob(r.vin, "done", `${res.options.length} options found.${note}`);
-    if (up && (up.stored || up.reason === "already_has_options_or_not_in_database")) refreshRow(r.vin);
-    if (claimed && !(up && up.stored)) rpc("release_vins", { p_worker: workerName(), p_vins: [r.vin] }).catch(() => {});
+    const up = res.upload || { error: "no answer from the database" };
+    if (up.stored) {
+      state.pinned.add(r.vin);
+      setJob(r.vin, "done", `${res.options.length} options found and saved.`);
+    } else if (up.reason === "already_has_options_or_not_in_database") {
+      setJob(r.vin, "done", "The database already has options for this car.");
+    } else {
+      setJob(r.vin, "failed", `${res.options.length} options found, but the database did not accept them: ${up.error || up.reason}.`);
+    }
+    refreshRow(r.vin);
+    if (claimed && !(up && up.stored)) rpc("release_vins", { p_worker: WORKER, p_vins: [r.vin] }).catch(() => {});
   } catch (err) {
     setJob(r.vin, "failed", err.message);
-    if (claimed) rpc("release_vins", { p_worker: workerName(), p_vins: [r.vin] }).catch(() => {});
+    if (claimed) rpc("release_vins", { p_worker: WORKER, p_vins: [r.vin] }).catch(() => {});
   }
 }
 
@@ -402,11 +372,11 @@ async function main() {
   }
   $("count").textContent = "Loading listings…";
   try {
-    state.db = await loadAll();
+    state.rows = await loadAll();
+    fillSelects(); render();
   } catch (e) {
-    $("error").hidden = false;
-    $("error").textContent = "Could not load shared listings (" + e.message + "). Showing what is saved on this device.";
+    $("count").textContent = ""; $("error").hidden = false;
+    $("error").textContent = "Could not load listings. " + e.message;
   }
-  mergeRows(); fillSelects(); render();
 }
 main();

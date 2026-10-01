@@ -67,5 +67,3 @@ pre { background: var(--chip); padding: 10px; border-radius: 8px; overflow: auto
 .search-fields button[disabled] { opacity: .6; cursor: default; }
 .search p { margin: 10px 0 0; }
 @media (max-width: 520px) { .topbar-inner { height: auto; padding: 8px 0; gap: 8px; } }
-.share { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13px; color: var(--muted); }
-.share input { width: auto; }

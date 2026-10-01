@@ -148,7 +148,7 @@ For the page: `GET /status`, `POST /fetch {"vin": "..."}` (202 queued, 409 unava
 
 `extension/` is a Chrome/Edge/Brave extension (Manifest V3) that lets the listings page do two things from the visitor's own browser, with no Python:
 
-- **Search AutoTempest** (the form at the top of the page). The extension opens the results in a background tab, loads every source, reads the cards and decodes the VINs with NHTSA. Results are kept in that browser's `localStorage`, not in the shared database.
+- **Search AutoTempest** (the form at the top of the page). The extension opens the results in a background tab, loads every source, reads the cards and decodes the VINs with NHTSA. Results are saved to the shared database (through the Edge Function below) and the page re-reads it, so the page always shows exactly what the database holds; nothing is stored in the browser.
 - **Fetch options** for non-BMW cars. The extension calls the manufacturer's site directly (extensions are not subject to CORS, a plain web page is), so there is no Chrome automation involved.
 
 Install (once per browser): download `car-lister-helper-<version>.zip` from the repo's latest GitHub Release, unzip it, then `chrome://extensions` > Developer mode > Load unpacked > pick the unzipped folder, and reload the page; the "Extension connected" badge turns green. (Developing: load the `extension` folder itself.)
@@ -178,18 +178,19 @@ Adding a make: implement `lookup(vin, make)` in its adapter (contract in `merced
 
 ### Edge Function: `submit-listings` (adds searched VINs to the database)
 
-When "Also add these listings to the shared database" is ticked, the extension sends each search's listings to the `submit-listings` Edge Function (`supabase/functions/submit-listings/`). The function:
+The extension sends each search's listings to the `submit-listings` Edge Function (`supabase/functions/submit-listings/`). The function:
 
 - rejects any row whose VIN has the wrong characters or a wrong check digit, or that NHTSA's vPIC does not recognise;
 - takes year / make / model / trim from the vPIC decode, never from the caller;
-- rejects a row whose title year is more than 1 off the decoded model year;
+- rejects a row whose title year is more than 1 off the decoded model year, or whose title doesn't name the decoded make;
+- rejects listings that aren't a whole car even though they carry a real VIN (parts, wheels, engines, diecast models, key fobs, manuals...): see "Whole-car check" below;
 - only accepts listing links on known listing sites (`LISTING_HOSTS` in `handler.mjs`; add more with the `ALLOWED_LISTING_HOSTS` secret) and photos from `autotempest.com`;
 - saves nothing if vPIC can't be reached;
 - writes through the existing `submit_listings` SQL function (new VINs are added, known ones get price/mileage refreshed, options are never touched).
 
 It reports how many rows were new, refreshed and rejected (with reasons). There is no per-IP rate limit yet.
 
-**Options.** The same function takes `{"options": {"vin", "listing", "build_sheet", "options", "option_codes"}}`, which the extension sends after a successful "Fetch options" (when the share box is ticked). It checks that the VIN is valid and decodes, that the build sheet carries that same VIN (the window sticker prints it) and a model year matching the decode, and that the option lists are well formed. It adds the car first if needed (via `submit_listings`), then writes the options only where the row has none yet, so the first result wins and nothing is overwritten. Sheets with named options (window stickers) store an empty `option_codes`. BMW options still go through the Python companion and `submit_options`. This is a consistency check, not proof: a determined person could still forge a sheet that carries the right VIN and year.
+**Options.** The same function takes `{"options": {"vin", "listing", "build_sheet", "options", "option_codes"}}`, which the extension sends after every successful "Fetch options"; the card then re-reads the database. It checks that the VIN is valid and decodes, that the build sheet carries that same VIN (the window sticker prints it) and a model year matching the decode, and that the option lists are well formed. It adds the car first if needed (via `submit_listings`), then writes the options only where the row has none yet, so the first result wins and nothing is overwritten. Sheets with named options (window stickers) store an empty `option_codes`. BMW options fetched by the extension come in the same way; the Python companion still uses `submit_options`. This is a consistency check, not proof: a determined person could still forge a sheet that carries the right VIN and year.
 
 Deploy once (and again after changing it), from this folder:
 
@@ -200,6 +201,22 @@ npx supabase functions deploy submit-listings --no-verify-jwt
 ```
 
 Test the logic with `node supabase/functions/submit-listings/handler.test.mjs`.
+
+#### Whole-car check
+
+A real VIN can still be attached to something that isn't a whole car ("2022 BMW M3 OEM wheels", "front bumper", "1:18 diecast"). Every listing is checked, both in the Edge Function (`listingProblem()` in `handler.mjs`, which reports the reason) and in the database itself (`_listing_problem()` in `schema_shared.sql`, used by `submit_listings`, so it also covers the Python scripts):
+
+| Rule | Reason |
+|---|---|
+| The title must start with a model year (`<year> <make> <model>`, as every AutoTempest car title does) | `title_not_year_make_model` |
+| The title must name the make the VIN decodes to | `title_make_mismatch` |
+| The title says it isn't a whole car: "for parts", "parting out", "diecast", "1:18", "brochure", "key fob", "engine only", ... | `looks_like_parts` |
+| The price is under $500 | `price_too_low` |
+| The title names a part (wheels, seats, bumper, engine, exhaust, ...) **and** there is no mileage or the price is under $5,000 | `looks_like_parts` |
+
+The last rule needs two signs on purpose: real cars are titled "…Carbon Seats! Only 2,900 Miles!" or "…392 Engine 6.4L". "Door" isn't a part word because "2-Door" / "4-Door" are body styles. Checked against all 3,830 listings in the database on 2026-10-01: none are flagged. A rejected row is never saved; in the SQL function it counts as `skipped`.
+
+After changing `schema_shared.sql`, run it again in the Supabase SQL Editor (it is safe to repeat), and redeploy the Edge Function.
 
 **Known gap:** the `submit_listings` SQL function itself is still callable with the anon key (the Python scripts use it), so it can be called directly without these checks. To enforce them everywhere, route the Python contributor path through the Edge Function and revoke `execute` on `submit_listings(jsonb)` from `anon, authenticated`.
 
