@@ -163,6 +163,31 @@ To use it on another site address, add that address to `content_scripts.matches`
 
 Adding a make: implement `lookup(vin, make)` in its adapter (contract in `mercedes.js`), set `ready: true` and add the site's address to `host_permissions`. Test the Stellantis parser with `cd extension && npm i && npm test`.
 
+### Edge Function: `submit-listings` (adds searched VINs to the database)
+
+When "Also add these listings to the shared database" is ticked, the extension sends each search's listings to the `submit-listings` Edge Function (`supabase/functions/submit-listings/`). The function:
+
+- rejects any row whose VIN has the wrong characters or a wrong check digit, or that NHTSA's vPIC does not recognise;
+- takes year / make / model / trim from the vPIC decode, never from the caller;
+- rejects a row whose title year is more than 1 off the decoded model year;
+- only accepts listing links on known listing sites (`LISTING_HOSTS` in `handler.mjs`; add more with the `ALLOWED_LISTING_HOSTS` secret) and photos from `autotempest.com`;
+- saves nothing if vPIC can't be reached;
+- writes through the existing `submit_listings` SQL function (new VINs are added, known ones get price/mileage refreshed, options are never touched).
+
+It reports how many rows were new, refreshed and rejected (with reasons). There is no per-IP rate limit yet.
+
+Deploy once (and again after changing it), from this folder:
+
+```bash
+npx supabase login
+npx supabase link --project-ref grhpcdbwnczekgfnsumo
+npx supabase functions deploy submit-listings --no-verify-jwt
+```
+
+Test the logic with `node supabase/functions/submit-listings/handler.test.mjs`.
+
+**Known gap:** the `submit_listings` SQL function itself is still callable with the anon key (the Python scripts use it), so it can be called directly without these checks. To enforce them everywhere, route the Python contributor path through the Edge Function and revoke `execute` on `submit_listings(jsonb)` from `anon, authenticated`.
+
 ## Debug helpers
 
 - `debug_selectors.py`: dumps the AutoTempest page to fix selectors if the site changes.

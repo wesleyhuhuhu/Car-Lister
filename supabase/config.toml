@@ -1,0 +1,6 @@
+# Minimal Supabase CLI config. The function is public on purpose (the listings page and the helper
+# extension call it without a login), so the JWT check is off; everything is validated in the function.
+project_id = "grhpcdbwnczekgfnsumo"
+
+[functions.submit-listings]
+verify_jwt = false

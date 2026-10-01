@@ -8,6 +8,7 @@
   "host_permissions": [
     "https://www.autotempest.com/*",
     "https://vpic.nhtsa.dot.gov/*",
+    "https://grhpcdbwnczekgfnsumo.supabase.co/*",
     "https://www.chrysler.com/*",
     "https://www.dodge.com/*",
     "https://www.jeep.com/*",

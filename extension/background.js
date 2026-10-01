@@ -3,6 +3,7 @@
 import { VIN_RE, adapterFor, describeAdapters } from "./adapters/index.js";
 import { decodeVins } from "./nhtsa.js";
 import { runSearch } from "./search.js";
+import { uploadListings } from "./upload.js";
 
 const jobs = new Map();           // jobId -> { state, message, result }
 let nextId = 1;
@@ -39,7 +40,9 @@ async function searchJob(id, params) {
         options: [], local: true,
       };
     });
-    finish(id, { state: "done", message: `Found ${listings.length} listings.`, result: listings });
+    let upload = null;
+    if (params.share !== false) upload = await uploadListings(listings, (m) => { job.message = m; });
+    finish(id, { state: "done", message: `Found ${listings.length} listings.`, result: { listings, upload } });
   } catch (e) {
     finish(id, { state: "failed", message: e.message || String(e) });
   }

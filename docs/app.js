@@ -97,7 +97,9 @@ async function runSearch(e) {
   const go = $("s-go"), status = $("s-status");
   go.disabled = true; status.textContent = "Starting…";
   try {
-    const found = await ext.runJob("search", { params: {
+    const share = $("s-share").checked;
+    const { listings: found, upload } = await ext.runJob("search", { params: {
+      share,
       make: $("s-make").value.trim(), model: $("s-model").value.trim(), zip: $("s-zip").value.trim(), radius: $("s-radius").value,
       minyear: num("s-minyear"), maxyear: num("s-maxyear"), maxprice: num("s-maxprice"),
     } }, (m) => { status.textContent = m; });
@@ -109,7 +111,18 @@ async function runSearch(e) {
     }
     state.local = [...known.values()];
     saveLocal(); mergeRows(); fillSelects(); render();
-    status.textContent = `Found ${found.length} listings (${state.local.length} saved on this device).`;
+    let msg = `Found ${found.length} listings (${state.local.length} saved on this device).`;
+    if (upload) {
+      if (upload.error) msg += ` Could not add them to the database: ${upload.error}`;
+      else {
+        msg += ` Database: ${upload.inserted} new, ${upload.updated} refreshed` + (upload.rejected
+          ? `, ${upload.rejected} not accepted (${Object.entries(upload.reasons).map(([k, v]) => `${k} x${v}`).join(", ")})` : "") + ".";
+        if (upload.inserted || upload.updated) {
+          try { state.db = await loadAll(); mergeRows(); fillSelects(); render(); } catch { /* the page keeps what it has */ }
+        }
+      }
+    }
+    status.textContent = msg;
   } catch (err) {
     status.textContent = err.message;
   } finally {
