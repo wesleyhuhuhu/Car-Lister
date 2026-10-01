@@ -2,6 +2,10 @@
   "name": "car-lister-extension",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node test/stellantis.test.mjs" },
-  "devDependencies": { "pdfjs-dist": "3.11.174" }
+  "scripts": {
+    "test": "node test/stellantis.test.mjs && node test/oemnav.test.mjs"
+  },
+  "devDependencies": {
+    "pdfjs-dist": "3.11.174"
+  }
 }

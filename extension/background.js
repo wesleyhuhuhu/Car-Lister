@@ -7,9 +7,11 @@ import { uploadListings, uploadOptions } from "./upload.js";
 
 const jobs = new Map();           // jobId -> { state, message, result }
 let nextId = 1;
-const GAP_MS = 1500;              // pause between lookups
+const GAP_MS = 1500;              // default pause between lookups on the same site (adapters can ask for more: minGapMs)
+const MAX_FAILURES = 3;           // failures in a row on one site before pausing it
+const COOLDOWN_MS = 15 * 60_000;  // ...for this long (same as companion.py)
 let lookupChain = Promise.resolve();
-let lastLookup = 0;
+const siteState = {};             // adapter id -> { last, failures, blockedUntil }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const parseMoney = (t) => { const d = String(t ?? "").replace(/[^\d]/g, ""); return d ? Number(d) : null; };
@@ -56,17 +58,29 @@ function fetchJob(id, vin, make, listing, share) {
       const adapter = adapterFor(make, vin);
       if (!adapter) throw new Error("No lookup site is set up for this make yet.");
       if (!adapter.ready) throw new Error(`${adapter.label}: not set up yet.`);
+      const site = (siteState[adapter.id] ||= { last: 0, failures: 0, blockedUntil: 0 });
+      if (Date.now() < site.blockedUntil) {
+        throw new Error(`${adapter.label} isn't answering; paused for ${Math.ceil((site.blockedUntil - Date.now()) / 60_000)} more minutes to stay under its limit.`);
+      }
+      const wait = (adapter.minGapMs || GAP_MS) - (Date.now() - site.last);
+      if (wait > 0) { job.message = `Waiting ${Math.ceil(wait / 1000)} s before the next ${adapter.label} lookup…`; await sleep(wait); }
       job.state = "running"; job.message = `Looking up on ${adapter.label}…`;
-      const wait = GAP_MS - (Date.now() - lastLookup);
-      if (wait > 0) await sleep(wait);
-      const { sheet, options, codes = [] } = await adapter.lookup(vin, make);   // codes: only for sites that list "CODE text" options
+      let looked;
+      try {
+        looked = await adapter.lookup(vin, make, { onMessage: (m) => { job.message = m; } });
+        site.failures = 0;
+      } catch (e) {
+        if (++site.failures >= MAX_FAILURES) { site.failures = 0; site.blockedUntil = Date.now() + COOLDOWN_MS; }
+        throw e;
+      } finally {
+        site.last = Date.now();
+      }
+      const { sheet, options, codes = [] } = looked;   // codes: only for sites that list "CODE text" options
       const result = { vin, build_sheet: sheet, options, option_codes: codes };
       if (share) { job.message = "Saving to the database…"; result.upload = await uploadOptions(vin, listing, result); }
       finish(id, { state: "done", message: `${options.length} options found.`, result });
     } catch (e) {
       finish(id, { state: "failed", message: e.message || String(e) });
-    } finally {
-      lastLookup = Date.now();
     }
   });
 }

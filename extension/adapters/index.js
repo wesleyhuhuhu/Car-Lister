@@ -3,8 +3,9 @@
 import { stellantis } from "./stellantis.js";
 import { mercedes } from "./mercedes.js";
 import { toyota } from "./toyota.js";
+import { bmw } from "./bmw.js";
 
-export const ADAPTERS = [stellantis, mercedes, toyota];
+export const ADAPTERS = [stellantis, mercedes, toyota, bmw];
 export const VIN_RE = /^[A-HJ-NPR-Z0-9]{17}$/;
 
 export function adapterFor(make, vin) {

@@ -159,7 +159,13 @@ To use it on another site address, add that address to `content_scripts.matches`
 | Chrysler, Dodge, Jeep, Ram, Fiat, Alfa Romeo | original window sticker, `/hostd/windowsticker/getWindowStickerPdf.do?vin=` on the brand sites | plain HTTP, PDF text read with pdf.js (`extension/adapters/stellantis*.js`) |
 | Mercedes-Benz | not set up yet | `extension/adapters/mercedes.js` |
 | Toyota | not set up yet | `extension/adapters/toyota.js` |
-| BMW | bimmer.work / oemnavigations.com | still the Python companion (section 4b) |
+| BMW, MINI, Rolls-Royce | bimmer.work, falling back to oemnavigations.com | the extension opens the site in a tab, types the VIN and presses Submit, so the site's own reCAPTCHA / Turnstile run normally and are never bypassed (`extension/adapters/bmw.js`, `oemnav.js`). One lookup every 10 s, and a 15-minute pause after 3 failures in a row. Without the extension, the button still uses the Python companion (section 4b). |
+
+BMW notes:
+- bimmer.work runs in a background tab by default (`BMW_TAB_ACTIVE` in `extension/config.js`).
+- When it answers 429 (Too Many Requests) or shows no form, the lookup switches to oemnavigations.com for 10 minutes, in a visible tab, because its second free check of the day shows a human check that you tick yourself. About 2 free checks a day. Turn the fallback off with `OEM_FALLBACK = false`.
+- Plain HTTP calls are not an option for either site: both protect their lookups with a captcha. bimmer.work's 429 page offers registered API access, which would be the legitimate HTTP route.
+- A BMW VIN that is in the database is claimed before the lookup (`claim_vin`, as the companion does) and released if the lookup fails.
 
 Adding a make: implement `lookup(vin, make)` in its adapter (contract in `mercedes.js`), set `ready: true` and add the site's address to `host_permissions`. Test the Stellantis parser with `cd extension && npm i && npm test`.
 

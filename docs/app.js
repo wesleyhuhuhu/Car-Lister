@@ -52,6 +52,23 @@ async function dbGet(query, extra = {}) {
   return res.json();
 }
 
+async function rpc(name, args) {
+  const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/rpc/${name}`, {
+    method: "POST", headers: { ...dbHeaders(), "Content-Type": "application/json" }, body: JSON.stringify(args),
+  });
+  if (!res.ok) throw new Error(`Database error ${res.status}`);
+  return res.json();
+}
+
+// A stable name for this browser, used for VIN claims (like companion.py's computer name).
+function workerName() {
+  try {
+    let w = localStorage.getItem("carlister.worker");
+    if (!w) { w = "web-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("carlister.worker", w); }
+    return w;
+  } catch { return "web-anonymous"; }
+}
+
 async function loadAll() {
   const rows = [];
   for (let from = 0; ; from += PAGE) {
@@ -133,6 +150,14 @@ async function runSearch(e) {
 async function fetchOptionsExt(r) {
   if (!state.ext) { await pollExt(); if (!state.ext) return openExtDialog(); }
   setJob(r.vin, "running", "Sending to the extension…");
+  // Like companion.py: claim a BMW VIN that is in the shared database so two people don't look it up at once.
+  let claimed = false;
+  if (isBmw(r) && state.db.some((d) => d.vin === r.vin)) {
+    try {
+      claimed = await rpc("claim_vin", { p_worker: workerName(), p_vin: r.vin });
+      if (!claimed) { setJob(r.vin, "failed", "Someone else is fetching this VIN, or it already has options."); return refreshRow(r.vin); }
+    } catch { /* database unreachable: look it up anyway; the first saved result wins */ }
+  }
   try {
     const listing = { title: r.title, price: r.price, price_text: r.price_text, mileage: r.mileage, mileage_text: r.mileage_text,
       source_site: r.source_site, location: r.location, listing_url: r.listing_url, image_url: r.image_url };
@@ -148,8 +173,10 @@ async function fetchOptionsExt(r) {
       : up.reason === "already_has_options_or_not_in_database" ? " The database already has options for this car." : ` Not added to the database (${up.reason}).`;
     setJob(r.vin, "done", `${res.options.length} options found.${note}`);
     if (up && (up.stored || up.reason === "already_has_options_or_not_in_database")) refreshRow(r.vin);
+    if (claimed && !(up && up.stored)) rpc("release_vins", { p_worker: workerName(), p_vins: [r.vin] }).catch(() => {});
   } catch (err) {
     setJob(r.vin, "failed", err.message);
+    if (claimed) rpc("release_vins", { p_worker: workerName(), p_vins: [r.vin] }).catch(() => {});
   }
 }
 
@@ -298,7 +325,11 @@ function actionArea(r) {
   let fetchBit = "";
   const working = job && (job.state === "queued" || job.state === "running");
   const validVin = /^[A-HJ-NPR-Z0-9]{17}$/i.test(r.vin || "");
-  if (!hasOptions(r) && isBmw(r)) {
+  if (!hasOptions(r) && isBmw(r) && state.ext && adapterOf(r) && adapterOf(r).ready) {
+    if (working) fetchBit = `<button class="btn primary" disabled>Fetching…</button>`;
+    else if (r.being_fetched) fetchBit = `<button class="btn" disabled>Being fetched by someone…</button>`;
+    else fetchBit = `<button class="btn primary" data-fetch-ext="${esc(r.vin)}">Fetch options</button>`;
+  } else if (!hasOptions(r) && isBmw(r)) {
     if (working) fetchBit = `<button class="btn primary" disabled>Fetching…</button>`;
     else if (r.being_fetched) fetchBit = `<button class="btn" disabled>Being fetched by someone…</button>`;
     else fetchBit = `<button class="btn primary" data-fetch="${esc(r.vin)}">Fetch options</button>`;

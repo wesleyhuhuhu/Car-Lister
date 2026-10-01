@@ -7,6 +7,8 @@
   "permissions": ["scripting", "offscreen"],
   "host_permissions": [
     "https://www.autotempest.com/*",
+    "https://bimmer.work/*",
+    "https://oemnavigations.com/*",
     "https://vpic.nhtsa.dot.gov/*",
     "https://grhpcdbwnczekgfnsumo.supabase.co/*",
     "https://www.chrysler.com/*",
