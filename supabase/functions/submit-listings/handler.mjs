@@ -129,19 +129,8 @@ export async function decodeBatch(vins, doFetch) {
   return out;
 }
 
-// deps: { fetch, supabaseUrl, serviceKey, extraHosts }
-export async function handle(req, deps) {
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-  if (req.method !== "POST") return json(405, { error: "POST a JSON body like {\"listings\": [...]}" });
-
-  const raw = await req.text();
-  if (raw.length > MAX_BODY_BYTES) return json(413, { error: "request too large" });
-  let body;
-  try { body = JSON.parse(raw); } catch { return json(400, { error: "body is not valid JSON" }); }
-  const rows = body && body.listings;
-  if (!Array.isArray(rows) || rows.length === 0) return json(400, { error: "send {\"listings\": [ ... ]} with at least one listing" });
-  if (rows.length > MAX_ROWS) return json(400, { error: `send at most ${MAX_ROWS} listings per call` });
-
+// Clean + verify raw rows. -> { good, rejected } or { error } when vPIC can't be reached.
+async function verifyRows(rows, deps) {
   const rejected = [];
   const clean = new Map();                                    // one row per VIN (the last copy wins)
   for (const r of rows) {
@@ -149,14 +138,12 @@ export async function handle(req, deps) {
     if (c.reject) rejected.push({ vin: c.vin || null, reason: c.reject });
     else clean.set(c.vin, c);
   }
-
   let specs;
   try {
     specs = await decodeBatch([...clean.keys()], deps.fetch);
   } catch (e) {
-    return json(503, { error: `Could not verify the VINs with NHTSA (${e.message}). Nothing was saved; try again shortly.` });
+    return { error: `Could not verify the VINs with NHTSA (${e.message}). Nothing was saved; try again shortly.` };
   }
-
   const good = [];
   for (const [vin, row] of clean) {
     const s = specs.get(vin);
@@ -165,20 +152,109 @@ export async function handle(req, deps) {
     if (merged.reject) rejected.push({ vin, reason: merged.reject });
     else good.push(merged);
   }
+  return { good, rejected, specs };
+}
 
+const serviceHeaders = (deps) => ({ apikey: deps.serviceKey, Authorization: `Bearer ${deps.serviceKey}`, "Content-Type": "application/json" });
+
+// Write verified rows through the existing submit_listings SQL function. -> { result } or { error }
+async function saveListings(good, deps) {
+  const res = await deps.fetch(`${deps.supabaseUrl}/rest/v1/rpc/submit_listings`, {
+    method: "POST", headers: serviceHeaders(deps), body: JSON.stringify({ p_rows: good }),
+  });
+  if (!res.ok) return { error: `The database refused the listings (HTTP ${res.status}): ${(await res.text()).slice(0, 300)}` };
+  const out = await res.json();
+  return { result: (Array.isArray(out) ? out[0] : out) || {} };
+}
+
+// ---------------------------------------------------------------- options
+const isObject = (v) => v && typeof v === "object" && !Array.isArray(v);
+
+// The sheet must be tied to this VIN: it has to carry the VIN printed on the source (the window sticker
+// prints it), and a model year that agrees with the VIN's decode. This is a consistency check, not proof:
+// someone determined could still forge a sheet, but not by accident or for the wrong car.
+export function checkOptions(o, vin, specs) {
+  const sheet = o.build_sheet;
+  if (!isObject(sheet)) return "build_sheet_missing";
+  if (JSON.stringify(sheet).length > 200_000) return "build_sheet_too_large";
+  const details = isObject(sheet.Details) ? sheet.Details : {};
+  if (String(details.VIN || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase() !== vin) return "sheet_vin_mismatch";
+  const year = details["Model Year"];
+  if (year != null && Number(year) !== specs.year) return "sheet_year_mismatch";
+  if (!Array.isArray(o.options) || o.options.length < 1 || o.options.length > 600) return "bad_options";
+  if (!o.options.every((s) => typeof s === "string" && s.trim() && s.length <= 300)) return "bad_options";
+  const codes = o.option_codes ?? [];
+  if (!Array.isArray(codes) || codes.length > 600 || !codes.every((c) => typeof c === "string" && /^[A-Z0-9]{2,5}$/.test(c))) return "bad_option_codes";
+  return null;
+}
+
+// o: { vin, listing?, build_sheet, options, option_codes? }
+async function handleOptions(o, deps) {
+  if (!isObject(o)) return json(400, { error: "send {\"options\": {\"vin\": ..., \"build_sheet\": ..., \"options\": [...]}}" });
+  const vin = String(o.vin ?? "").trim().toUpperCase();
+  if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin) || !vinCheckDigitOk(vin)) return json(400, { error: "that is not a valid VIN" });
+
+  let specs;
+  try {
+    specs = (await decodeBatch([vin], deps.fetch)).get(vin);
+  } catch (e) {
+    return json(503, { error: `Could not verify the VIN with NHTSA (${e.message}). Nothing was saved; try again shortly.` });
+  }
+  if (!specs) return json(200, { stored: false, reason: "vin_not_recognized" });
+  const bad = checkOptions(o, vin, specs);
+  if (bad) return json(200, { stored: false, reason: bad });
+
+  if (o.listing) {                                            // make sure the car is in the table first
+    const v = await verifyRows([{ ...o.listing, vin }], deps);
+    if (v.error) return json(503, { error: v.error });
+    if (v.good.length) {
+      const saved = await saveListings(v.good, deps);
+      if (saved.error) return json(502, { error: saved.error });
+    }
+  }
+
+  const now = new Date().toISOString();
+  const res = await deps.fetch(`${deps.supabaseUrl}/rest/v1/listings?vin=eq.${vin}&build_sheet=is.null&select=vin`, {
+    method: "PATCH",
+    headers: { ...serviceHeaders(deps), Prefer: "return=representation" },
+    body: JSON.stringify({
+      build_sheet: o.build_sheet, options: o.options.map((s) => s.trim()), option_codes: o.option_codes ?? [],
+      options_checked_at: now, updated_at: now, claimed_by: null, claimed_at: null,
+    }),
+  });
+  if (!res.ok) return json(502, { error: `The database refused the options (HTTP ${res.status}): ${(await res.text()).slice(0, 300)}` });
+  const rows = await res.json();
+  return json(200, Array.isArray(rows) && rows.length
+    ? { stored: true }
+    : { stored: false, reason: "already_has_options_or_not_in_database" });
+}
+
+// ---------------------------------------------------------------- the request handler
+// deps: { fetch, supabaseUrl, serviceKey, extraHosts }
+export async function handle(req, deps) {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  if (req.method !== "POST") return json(405, { error: "POST a JSON body like {\"listings\": [...]} or {\"options\": {...}}" });
+
+  const raw = await req.text();
+  if (raw.length > MAX_BODY_BYTES) return json(413, { error: "request too large" });
+  let body;
+  try { body = JSON.parse(raw); } catch { return json(400, { error: "body is not valid JSON" }); }
+  if (body && body.options !== undefined) return handleOptions(body.options, deps);
+
+  const rows = body && body.listings;
+  if (!Array.isArray(rows) || rows.length === 0) return json(400, { error: "send {\"listings\": [ ... ]} with at least one listing" });
+  if (rows.length > MAX_ROWS) return json(400, { error: `send at most ${MAX_ROWS} listings per call` });
+
+  const v = await verifyRows(rows, deps);
+  if (v.error) return json(503, { error: v.error });
   let result = { inserted: 0, updated: 0, skipped: 0 };
-  if (good.length) {
-    const res = await deps.fetch(`${deps.supabaseUrl}/rest/v1/rpc/submit_listings`, {
-      method: "POST",
-      headers: { apikey: deps.serviceKey, Authorization: `Bearer ${deps.serviceKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ p_rows: good }),
-    });
-    if (!res.ok) return json(502, { error: `The database refused the listings (HTTP ${res.status}): ${(await res.text()).slice(0, 300)}` });
-    const out = await res.json();
-    result = (Array.isArray(out) ? out[0] : out) || result;
+  if (v.good.length) {
+    const saved = await saveListings(v.good, deps);
+    if (saved.error) return json(502, { error: saved.error });
+    result = { ...result, ...saved.result };
   }
   return json(200, {
     inserted: Number(result.inserted) || 0, updated: Number(result.updated) || 0, skipped: Number(result.skipped) || 0,
-    rejected_count: rejected.length, rejected: rejected.slice(0, 20),
+    rejected_count: v.rejected.length, rejected: v.rejected.slice(0, 20),
   });
 }

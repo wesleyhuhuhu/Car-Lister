@@ -74,4 +74,46 @@ assert.equal((await handle(post({ listings: [] }), deps())).status, 400);
 assert.equal((await handle(post({ listings: new Array(501).fill(good) }), deps())).status, 400);
 assert.equal((await handle(new Request("https://f", { method: "OPTIONS" }), deps())).status, 204);
 assert.equal((await handle(new Request("https://f"), deps())).status, 405);
+
+// ---- options action
+function optDeps({ patchRows = [{ vin: "1C6SRFHMXNN112704" }], calls = [] } = {}) {
+  const d = deps({ calls });
+  const base = d.fetch;
+  d.fetch = async (url, init) => {
+    if (url.includes("/rest/v1/listings?")) { calls.push({ url, init }); return Response.json(patchRows); }
+    return base(url, init);
+  };
+  return d;
+}
+const sheet = { Details: { VIN: "1C6SRFHMXNN112704", "Model Year": "2022" }, Options: { "Trailer-Tow Group": "$995" }, Source: "www.ramtrucks.com window sticker" };
+const opt = { vin: "1c6srfhmxnn112704", build_sheet: sheet, options: ["Trailer-Tow Group $995", "Heated Seats (standard)"], listing: good };
+
+calls = [];
+res = await handle(post({ options: opt }), optDeps({ calls }));
+out = await res.json();
+assert.deepEqual(out, { stored: true });
+const patch = calls.find((c) => c.url.includes("/rest/v1/listings?"));
+assert.equal(patch.init.method, "PATCH");
+assert.match(patch.url, /vin=eq\.1C6SRFHMXNN112704&build_sheet=is\.null/);     // first writer wins: never overwrites options
+assert.deepEqual(JSON.parse(patch.init.body).option_codes, []);
+assert.ok(calls.some((c) => c.url.includes("rpc/submit_listings")), "the listing is added first so the row exists");
+
+const reason = async (o, d = optDeps()) => (await (await handle(post({ options: o }), d)).json()).reason;
+assert.equal(await reason({ ...opt, build_sheet: { ...sheet, Details: { ...sheet.Details, VIN: "1C6SRFHMXNN112706" } } }), "sheet_vin_mismatch");
+assert.equal(await reason({ ...opt, build_sheet: { Options: {} } }), "sheet_vin_mismatch");
+assert.equal(await reason({ ...opt, build_sheet: { ...sheet, Details: { ...sheet.Details, "Model Year": "2015" } } }), "sheet_year_mismatch");
+assert.equal(await reason({ ...opt, options: [] }), "bad_options");
+assert.equal(await reason({ ...opt, options: [42] }), "bad_options");
+assert.equal(await reason({ ...opt, option_codes: ["not a code"] }), "bad_option_codes");
+assert.equal(await reason({ ...opt, build_sheet: undefined }), "build_sheet_missing");
+assert.equal(await reason(opt, optDeps({ patchRows: [] })), "already_has_options_or_not_in_database");
+assert.equal(await reason({ ...opt, vin: "4T1K61AK9MU614925", build_sheet: { ...sheet, Details: { VIN: "4T1K61AK9MU614925" } } }), "vin_not_recognized");
+assert.equal((await handle(post({ options: { ...opt, vin: "1C6SRFHMXNN112705" } }), optDeps())).status, 400);
+calls = [];
+assert.equal((await handle(post({ options: opt }), Object.assign(optDeps({ calls }), { fetch: async (u) => (u.includes("vpic") ? new Response("x", { status: 500 }) : Response.json([])) }))).status, 503);
+// a rejected listing (bad link) does not stop the options from being stored for a row that already exists
+calls = [];
+res = await handle(post({ options: { ...opt, listing: { ...good, listing_url: "https://phish.example/x" } } }), optDeps({ calls }));
+assert.deepEqual(await res.json(), { stored: true });
+assert.ok(!calls.some((c) => c.url.includes("rpc/submit_listings")));
 console.log("ok: submit-listings");

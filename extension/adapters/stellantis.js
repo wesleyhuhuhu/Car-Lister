@@ -39,6 +39,7 @@ export const stellantis = {
     }
     const sheet = parseStellantisSticker(await pdfToLines(buf));
     if (!sheet.Optional.length && !sheet.Standard.length) throw new Error("The window sticker could not be read.");
+    if (sheet.Details.VIN !== vin) throw new Error("The window sticker does not show this VIN, so it was not used.");
     sheet.Source = `${host} window sticker`;
     return { sheet, options: optionStrings(sheet) };
   },

@@ -176,6 +176,8 @@ When "Also add these listings to the shared database" is ticked, the extension s
 
 It reports how many rows were new, refreshed and rejected (with reasons). There is no per-IP rate limit yet.
 
+**Options.** The same function takes `{"options": {"vin", "listing", "build_sheet", "options", "option_codes"}}`, which the extension sends after a successful "Fetch options" (when the share box is ticked). It checks that the VIN is valid and decodes, that the build sheet carries that same VIN (the window sticker prints it) and a model year matching the decode, and that the option lists are well formed. It adds the car first if needed (via `submit_listings`), then writes the options only where the row has none yet, so the first result wins and nothing is overwritten. Sheets with named options (window stickers) store an empty `option_codes`. BMW options still go through the Python companion and `submit_options`. This is a consistency check, not proof: a determined person could still forge a sheet that carries the right VIN and year.
+
 Deploy once (and again after changing it), from this folder:
 
 ```bash

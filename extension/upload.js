@@ -29,3 +29,20 @@ export async function uploadListings(listings, onProgress = () => {}) {
   }
   return total;
 }
+
+// Sends one fetched build sheet. `listing` (the card's fields) lets the function add the car first if it
+// isn't in the database yet. Resolves to { stored, reason, error } and never throws.
+export async function uploadOptions(vin, listing, result) {
+  const row = listing ? Object.fromEntries(FIELDS.map((f) => [f, listing[f] ?? null])) : undefined;
+  try {
+    const res = await fetch(SUBMIT_LISTINGS_URL, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ options: { vin, listing: row, build_sheet: result.build_sheet, options: result.options, option_codes: result.option_codes } }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) return { stored: false, error: body.error || `The database answered HTTP ${res.status}.` };
+    return { stored: !!body.stored, reason: body.reason || null };
+  } catch (e) {
+    return { stored: false, error: `Could not reach the database (${e.message}).` };
+  }
+}

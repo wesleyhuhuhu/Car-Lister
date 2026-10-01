@@ -134,13 +134,20 @@ async function fetchOptionsExt(r) {
   if (!state.ext) { await pollExt(); if (!state.ext) return openExtDialog(); }
   setJob(r.vin, "running", "Sending to the extension…");
   try {
-    const res = await ext.runJob("fetchOptions", { vin: r.vin, make: r.make }, (m) => setJob(r.vin, "running", m));
+    const listing = { title: r.title, price: r.price, price_text: r.price_text, mileage: r.mileage, mileage_text: r.mileage_text,
+      source_site: r.source_site, location: r.location, listing_url: r.listing_url, image_url: r.image_url };
+    const res = await ext.runJob("fetchOptions", { vin: r.vin, make: r.make, listing, share: $("s-share").checked },
+      (m) => setJob(r.vin, "running", m));
     const i = state.local.findIndex((l) => l.vin === r.vin);
     const patch = { options: res.options, option_codes: res.option_codes, build_sheet: res.build_sheet, options_checked_at: new Date().toISOString() };
     if (i >= 0) state.local[i] = { ...state.local[i], ...patch };
     else state.local.push({ ...r, ...patch, local: true });
     saveLocal(); state.pinned.add(r.vin); mergeRows();
-    setJob(r.vin, "done", `${res.options.length} options found.`);
+    const up = res.upload;
+    const note = !up ? "" : up.stored ? " Added to the database." : up.error ? ` Not added to the database: ${up.error}`
+      : up.reason === "already_has_options_or_not_in_database" ? " The database already has options for this car." : ` Not added to the database (${up.reason}).`;
+    setJob(r.vin, "done", `${res.options.length} options found.${note}`);
+    if (up && (up.stored || up.reason === "already_has_options_or_not_in_database")) refreshRow(r.vin);
   } catch (err) {
     setJob(r.vin, "failed", err.message);
   }

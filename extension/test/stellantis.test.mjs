@@ -10,6 +10,7 @@ assert.equal(sheet.Details["Model Year"], "2022");
 assert.equal(sheet.Details["Exterior Color"], "Bright White Clear-Coat Exterior Paint");
 assert.equal(sheet.Details["Base Price"], "$64,095");
 assert.equal(sheet.Details["Total Price"], "$77,355");
+assert.equal(sheet.Details.VIN, "1C6SRFHMXNN112704");
 assert.equal(sheet.Details["Destination Charge"], "$1,795");
 assert.ok(sheet.Options["28M"]);
 const tow = sheet.Optional.find((o) => o.name === "Trailer-Tow Group");

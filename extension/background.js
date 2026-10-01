@@ -3,7 +3,7 @@
 import { VIN_RE, adapterFor, describeAdapters } from "./adapters/index.js";
 import { decodeVins } from "./nhtsa.js";
 import { runSearch } from "./search.js";
-import { uploadListings } from "./upload.js";
+import { uploadListings, uploadOptions } from "./upload.js";
 
 const jobs = new Map();           // jobId -> { state, message, result }
 let nextId = 1;
@@ -48,7 +48,7 @@ async function searchJob(id, params) {
   }
 }
 
-function fetchJob(id, vin, make) {
+function fetchJob(id, vin, make, listing, share) {
   const job = jobs.get(id);
   job.state = "queued"; job.message = "Waiting for your turn…";
   lookupChain = lookupChain.then(async () => {
@@ -60,10 +60,9 @@ function fetchJob(id, vin, make) {
       const wait = GAP_MS - (Date.now() - lastLookup);
       if (wait > 0) await sleep(wait);
       const { sheet, options, codes = [] } = await adapter.lookup(vin, make);   // codes: only for sites that list "CODE text" options
-      finish(id, {
-        state: "done", message: `${options.length} options found.`,
-        result: { vin, build_sheet: sheet, options, option_codes: codes },
-      });
+      const result = { vin, build_sheet: sheet, options, option_codes: codes };
+      if (share) { job.message = "Saving to the database…"; result.upload = await uploadOptions(vin, listing, result); }
+      finish(id, { state: "done", message: `${options.length} options found.`, result });
     } catch (e) {
       finish(id, { state: "failed", message: e.message || String(e) });
     } finally {
@@ -81,11 +80,11 @@ const handlers = {
     return { jobId: id };
   },
 
-  fetchOptions: ({ vin, make }) => {
+  fetchOptions: ({ vin, make, listing, share }) => {
     vin = String(vin || "").trim().toUpperCase();
     if (!VIN_RE.test(vin)) return { error: "That is not a valid 17-character VIN." };
     const id = newJob("Queued…");
-    fetchJob(id, vin, make);
+    fetchJob(id, vin, make, listing, share !== false);
     return { jobId: id };
   },
 

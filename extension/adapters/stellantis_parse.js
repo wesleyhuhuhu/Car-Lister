@@ -63,6 +63,8 @@ export function parseStellantisSticker(rawLines) {
         sheet.Optional.push({ name: line, price: "", includes: [] });
       }
     } else if (section === "tail") {
+      const vin = line.match(/^VIN\s*:?\s*([A-HJ-NPR-Z0-9]{3}-?[A-HJ-NPR-Z0-9]{8}-?[A-HJ-NPR-Z0-9]{6})/i);   // "VIN : 1C6-SRFHMXNN-112704"
+      if (vin && !sheet.Details.VIN) sheet.Details.VIN = vin[1].replace(/-/g, "").toUpperCase();
       const total = line.match(/^TOTAL PRICE:?\s*\*?\s*(\$[\d,]+)/i);
       if (total) sheet.Details["Total Price"] = total[1];
       const asm = line.match(/^Assembly Point\/Port of Entry:\s*(.*?)(?:\s+S\.L\.)?$/i);
