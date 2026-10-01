@@ -170,6 +170,15 @@ If bimmer.work blocks a lookup (HTTP 429, or no VIN box / Submit button), the lo
 - Turn it off with `--no-fallback` (all lookup scripts) or `OEM_FALLBACK=0`.
 - This site lists options with a leading zero (`0248`, `01CB`); they are converted to bimmer.work's style (`248`, `1CB`). Option wording differs slightly between the sites.
 
+## Contributing scraped listings without the secret key
+
+Anyone with just `SUPABASE_URL` and `SUPABASE_ANON_KEY` in `.env` can run `python main.py ...` and their results are uploaded too (run the updated `schema_shared.sql` in Supabase first; it adds `submit_listings`).
+
+- **New listings** are added, with no overall limit (the scripts send 200 per call; the database accepts up to 500 per call).
+- **Listings already in the database** only get their price, mileage, location, link and photo refreshed, and empty year/make/model/trim filled in. Options and build sheets are never changed by this, and nothing can be deleted.
+- Options found by `lookup_matching.py` / `lookup_options.py` are submitted too; the first result for a VIN wins.
+- The owner (with `SUPABASE_SERVICE_KEY`) still uploads directly, as before.
+
 
 
 https://github.com/user-attachments/assets/93a594d0-1744-4c81-9220-b589e738dd90

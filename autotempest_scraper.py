@@ -24,7 +24,7 @@ import re
 import urllib.parse
 from typing import Optional
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from models import Listing
 
@@ -185,6 +185,27 @@ def _extract_row(page, section) -> Optional[Listing]:
     )
 
 
+def launch_browser(p, headless: bool):
+    """Playwright's own Chromium when it is installed (what earlier runs used). If it was
+    never downloaded (`playwright install` not run, or blocked on a company network), use
+    the Google Chrome or Microsoft Edge already on this computer instead."""
+    try:
+        return p.chromium.launch(headless=headless)
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" not in str(exc):
+            raise
+        for channel in ("chrome", "msedge"):
+            try:
+                browser = p.chromium.launch(channel=channel, headless=headless)
+                print(f"Playwright's own browser isn't installed; using {channel} instead.")
+                return browser
+            except PlaywrightError:
+                continue
+        raise RuntimeError(
+            "No browser found. Install Google Chrome (or Edge), or run `playwright install chromium`."
+        ) from exc
+
+
 def scrape_search(
     search_url: str,
     max_listings: Optional[int] = None,
@@ -204,7 +225,7 @@ def scrape_search(
     seen_urls = set()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = launch_browser(p, headless)
         page = browser.new_page(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
