@@ -7,6 +7,7 @@ const BASE_COLUMNS = "listing_key,vin,title,year,make,model,trim,price,price_tex
 let COLUMNS = BASE_COLUMNS + ",color,interior";
 const PAGE = 1000;          // rows per database request
 const SHOW_STEP = 60;       // cards rendered per "Show more"
+const LATEST = 9;           // listings fetched on first load; the rest only when someone filters, sorts or asks for more
 const $ = (id) => document.getElementById(id);
 
 const state = {
@@ -18,6 +19,10 @@ const state = {
   near: null,               // { origin: [lat, lon], radius: miles | null } from the "Near ZIP" filter
   shown: SHOW_STEP,
   makesLoaded: false,
+  loaded: false,            // the first request has answered (until then the page says "Loading listings…")
+  full: false,              // false while only the LATEST newest listings are loaded
+  total: null,              // how many listings the database holds (from the first request's Content-Range)
+  fullLoading: null,
 };
 
 // The shared database is the only source of listings: searches and fetched options are saved there and the
@@ -85,6 +90,34 @@ async function loadAll() {
   }
   return rows;
 }
+
+// First load: only the newest few, plus the total count, so the page shows listings straight away.
+async function loadLatest() {
+  const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/public_listings?select=${COLUMNS}&order=updated_at.desc&limit=${LATEST}`,
+    { headers: { ...dbHeaders(), Prefer: "count=exact" } });
+  if (res.status === 400 && COLUMNS !== BASE_COLUMNS) { COLUMNS = BASE_COLUMNS; return loadLatest(); }   // view not updated yet
+  if (!res.ok) throw new Error(`Database error ${res.status}`);
+  const total = Number((res.headers.get("Content-Range") || "").split("/")[1]);
+  return { rows: await res.json(), total: Number.isFinite(total) ? total : null };
+}
+
+// Everything, the first time someone needs it (filters, sort and "Show all" work over every listing).
+function ensureFull() {
+  if (state.full) return Promise.resolve();
+  if (!state.fullLoading) {
+    $("count").textContent = "Loading all listings…";
+    state.fullLoading = loadAll().then((rows) => {
+      state.rows = rows; state.full = true; state.total = rows.length; state.loaded = true;
+      fillSelects(); render();
+    }).catch((e) => {
+      state.fullLoading = null;
+      $("error").hidden = false; $("error").textContent = "Could not load all listings. " + e.message;
+      throw e;
+    });
+  }
+  return state.fullLoading;
+}
+const afterFull = (fn) => (...args) => ensureFull().then(() => fn(...args), () => {});
 
 async function refreshRow(vin) {
   try {
@@ -229,7 +262,7 @@ async function runSearch(e) {
     let msg = `Found ${found.length} listings: ${upload.inserted} new, ${upload.updated} refreshed` + (upload.rejected
       ? `, ${upload.rejected} not accepted (${Object.entries(upload.reasons).map(([k, v]) => `${k.replace(/_/g, " ")} ×${v}`).join(", ")})` : "") + ".";
     try {
-      state.rows = await loadAll();
+      state.rows = await loadAll(); state.full = true; state.total = state.rows.length; state.loaded = true;
       showSearchInFilters(params);
     } catch (err) { msg += ` Reload the page to see them (${err.message}).`; }
     setSearchStatus(msg, "ok");
@@ -546,13 +579,22 @@ function card(r, ts) {
 }
 
 function render() {
+  if (!state.loaded) return;                // nothing to show yet: keep "Loading listings…"
   const { rows, unknownPlace } = filtered(), ts = terms("f-options");
   const shown = rows.slice(0, state.shown);
-  $("count").innerHTML = `<strong>${rows.length.toLocaleString()}</strong> of ${state.rows.length.toLocaleString()} listings` +
-    (unknownPlace ? ` <span title="Their city couldn't be placed on the map">(${unknownPlace} with an unknown location hidden)</span>` : "");
-  $("grid").innerHTML = shown.map((r) => card(r, ts)).join("");
-  $("more-wrap").hidden = rows.length <= shown.length;
-  $("more").textContent = `Show more (${(rows.length - shown.length).toLocaleString()} left)`;
+  if (!state.full) {
+    const total = state.total ?? state.rows.length;
+    $("count").innerHTML = `The <strong>${shown.length}</strong> newest of ${total.toLocaleString()} listings`;
+    $("grid").innerHTML = shown.map((r) => card(r, ts)).join("");
+    $("more-wrap").hidden = total <= shown.length;
+    $("more").textContent = `Show all ${total.toLocaleString()} listings`;
+  } else {
+    $("count").innerHTML = `<strong>${rows.length.toLocaleString()}</strong> of ${state.rows.length.toLocaleString()} listings` +
+      (unknownPlace ? ` <span title="Their city couldn't be placed on the map">(${unknownPlace} with an unknown location hidden)</span>` : "");
+    $("grid").innerHTML = shown.map((r) => card(r, ts)).join("");
+    $("more-wrap").hidden = rows.length <= shown.length;
+    $("more").textContent = `Show more (${(rows.length - shown.length).toLocaleString()} left)`;
+  }
   $("empty").hidden = rows.length > 0 || state.rows.length === 0;
   const n = activeFilterCount();
   $("filter-count").hidden = !n; $("filter-count").textContent = n;
@@ -566,18 +608,23 @@ function filtersChanged() {
 
 // ---------------------------------------------------------------- start
 function wire() {
-  for (const id of ["f-search", "f-options", "f-year-min", "f-year-max", "f-price-max", "f-miles-max"]) $(id).addEventListener("input", filtersChanged);
-  for (const id of ["f-has", "f-sort"]) $(id).addEventListener("change", filtersChanged);
-  for (const id of ["f-make", "f-model", "f-trim"]) $(id).addEventListener("change", () => { fillSelects(); filtersChanged(); });
-  const nearChanged = async () => { await updateNear(); filtersChanged(); };
+  // Filters and sort work over every listing: touching them loads the rest (once) before applying.
+  for (const el of [$("filters-panel"), $("f-sort")]) el.addEventListener("focusin", () => ensureFull().catch(() => {}));
+  for (const id of ["f-search", "f-options", "f-year-min", "f-year-max", "f-price-max", "f-miles-max"]) $(id).addEventListener("input", afterFull(filtersChanged));
+  for (const id of ["f-has", "f-sort"]) $(id).addEventListener("change", afterFull(filtersChanged));
+  for (const id of ["f-make", "f-model", "f-trim"]) $(id).addEventListener("change", afterFull(() => { fillSelects(); filtersChanged(); }));
+  const nearChanged = afterFull(async () => { await updateNear(); filtersChanged(); });
   $("f-zip").addEventListener("input", () => { if (/^\d{5}$/.test($("f-zip").value.trim()) || !$("f-zip").value.trim()) nearChanged(); });
   $("f-radius").addEventListener("change", nearChanged);
-  $("f-reset").addEventListener("click", async () => {
+  $("f-reset").addEventListener("click", afterFull(async () => {
     for (const el of document.querySelectorAll(".filters input, .filters select")) el.value = "";
     $("f-sort").value = "new";
     fillSelects(); await updateNear(); filtersChanged();
+  }));
+  $("more").addEventListener("click", () => {
+    if (!state.full) return ensureFull().catch(() => {});     // "Show all": the first full page
+    state.shown += SHOW_STEP; render();
   });
-  $("more").addEventListener("click", () => { state.shown += SHOW_STEP; render(); });
   $("grid").addEventListener("click", (e) => {
     const b = e.target.closest("[data-fetch]");
     if (b) return fetchOptions(b.dataset.fetch);
@@ -602,7 +649,9 @@ async function main() {
   }
   $("count").textContent = "Loading listings…";
   try {
-    state.rows = await loadAll();
+    const { rows, total } = await loadLatest();
+    state.rows = rows; state.total = total; state.loaded = true;
+    if (total != null && total <= rows.length) { state.full = true; }    // a tiny database: that was everything
     fillSelects(); render();
   } catch (e) {
     $("count").textContent = ""; $("error").hidden = false;
