@@ -117,3 +117,28 @@ res = await handle(post({ options: { ...opt, listing: { ...good, listing_url: "h
 assert.deepEqual(await res.json(), { stored: true });
 assert.ok(!calls.some((c) => c.url.includes("rpc/submit_listings")));
 console.log("ok: submit-listings");
+
+// ---- whole-car check
+import { listingProblem } from "./handler.mjs";
+const P = (title, price, mileage, make = "BMW") => listingProblem({ title, price, mileage }, { make });
+assert.equal(P("2022 BMW M3 Competition OEM wheels 19/20 forged", 2400, null), "looks_like_parts");
+assert.equal(P("2023 Jeep Wrangler Rubicon front bumper", 650, null, "JEEP"), "looks_like_parts");
+assert.equal(P("2021 BMW M3 S58 engine 12k miles", 14500, null), "looks_like_parts");
+assert.equal(P("2024 BMW M3 for parts", 18000, 80000), "looks_like_parts");
+assert.equal(P("2023 BMW M3 Competition 1:18 diecast", 140, null), "looks_like_parts");
+assert.equal(P("2022 BMW M3 key fob", 120, null), "looks_like_parts");
+assert.equal(P("OEM BMW G80 M3 carbon seats", 6000, null), "title_not_year_make_model");
+assert.equal(P("2020 Ford Mustang GT", 30000, 20000), "title_make_mismatch");
+assert.equal(P("2022 BMW M3", 300, 20000), "price_too_low");
+assert.equal(P("2024 BMW M3 CS Sedan Carbon Seats! Only 2,900 Miles!", 137912, 2957), null);
+assert.equal(P("2023 Jeep Wrangler Rubicon 392 8-Speed Automatic Engine 6.4L", 77500, 22683, "JEEP"), null);
+assert.equal(P("2023 Jeep Wrangler Sport 2-Door", 24450, 59367, "JEEP"), null);
+assert.equal(P("2024 Mercedes-Benz AMG C 63 S E Performance", 64998, 27136, "MERCEDES-BENZ"), null);
+assert.equal(P("2022 BMW M3 Competition", 70000, null), null);          // no mileage alone is fine (CarGurus often omits it)
+// through the handler: a parts listing with a real VIN is rejected with its reason
+calls = [];
+res = await handle(post({ listings: [{ ...good, title: "2022 RAM 1500 Limited tailgate and bumper", price: 900, mileage: null }] }), deps({ calls }));
+out = await res.json();
+assert.deepEqual(out.rejected.map((r) => r.reason), ["looks_like_parts"]);
+assert.ok(!calls.some((c) => c.url.includes("rpc")));
+console.log("ok: whole-car check");

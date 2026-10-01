@@ -3,6 +3,7 @@
 import { VIN_RE, adapterFor, describeAdapters } from "./adapters/index.js";
 import { decodeVins } from "./nhtsa.js";
 import { runSearch } from "./search.js";
+import { TabClosed } from "./adapters/tabs.js";
 import { uploadListings, uploadOptions } from "./upload.js";
 
 const jobs = new Map();           // jobId -> { state, message, result }
@@ -70,7 +71,7 @@ function fetchJob(id, vin, make, listing, share) {
         looked = await adapter.lookup(vin, make, { onMessage: (m) => { job.message = m; } });
         site.failures = 0;
       } catch (e) {
-        if (++site.failures >= MAX_FAILURES) { site.failures = 0; site.blockedUntil = Date.now() + COOLDOWN_MS; }
+        if (!(e instanceof TabClosed) && ++site.failures >= MAX_FAILURES) { site.failures = 0; site.blockedUntil = Date.now() + COOLDOWN_MS; }
         throw e;
       } finally {
         site.last = Date.now();

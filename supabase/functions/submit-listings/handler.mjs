@@ -100,10 +100,35 @@ export function specsFromVpic(rec) {
   return { year, make: make.slice(0, 60), model: (field(rec, "Model") || "").slice(0, 100) || null, trim: (field(rec, "Trim") || "").slice(0, 100) || null };
 }
 
-// Merge decoded specs into a cleaned row; reject when the title's year contradicts the VIN.
+// ---------------------------------------------------------------- "is this a whole car?"
+// A real VIN can still be attached to a parts listing ("2022 BMW M3 OEM wheels"), so the listing itself is checked too.
+// Keep these lists the same as _listing_problem() in schema_shared.sql, which applies them to every other way in.
+// Always rejected: the title says outright it is not a whole, driveable car.
+export const NOT_A_CAR = /\b(for parts|parts only|parts car|part(ing|ed)? ?out|diecast|die-cast|scale model|1:(8|12|18|24|43|64)|brochure|owner'?s manual|sales literature|key ?fob|floor mats?|car cover|shell only|body only|roller only|engine only|motor only|transmission only)\b/i;
+// Rejected only together with another sign (no mileage, or a price below PART_PRICE_BELOW).
+// "door" is deliberately missing: "2-Door" / "4-Door" are body styles.
+export const PART_WORDS = /\b(wheels?|rims?|tires?|tyres?|seats?|bumpers?|hood|fenders?|head ?lights?|head ?lamps?|tail ?lights?|tail ?lamps?|exhaust|intake|turbos?|engine|motor|transmission|gearbox|differential|steering wheel|grille|spoiler|mirrors?|radio|head unit|ecu|module|harness|airbags?)\b/i;
+const PART_PRICE_BELOW = 5000;
+const MIN_PRICE = 500;
+const squash = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+// -> reason string, or null when the listing looks like a whole car. specs (the VIN decode) is optional.
+export function listingProblem(row, specs) {
+  const title = row.title || "";
+  if (!/^\s*(19|20)\d\d\b/.test(title)) return "title_not_year_make_model";    // car titles are "<year> <make> <model>"
+  if (specs && specs.make && !squash(title).includes(squash(specs.make))) return "title_make_mismatch";
+  if (NOT_A_CAR.test(title)) return "looks_like_parts";
+  if (row.price != null && row.price < MIN_PRICE) return "price_too_low";
+  if (PART_WORDS.test(title) && (row.mileage == null || (row.price != null && row.price < PART_PRICE_BELOW))) return "looks_like_parts";
+  return null;
+}
+
+// Merge decoded specs into a cleaned row; reject when the title contradicts the VIN or isn't a whole car.
 export function withSpecs(row, specs) {
   const titleYear = /^\s*((?:19|20)\d\d)\b/.exec(row.title);
   if (titleYear && Math.abs(Number(titleYear[1]) - specs.year) > 1) return { reject: "title_year_mismatch", vin: row.vin };
+  const problem = listingProblem(row, specs);
+  if (problem) return { reject: problem, vin: row.vin };
   return { ...row, ...specs };
 }
 

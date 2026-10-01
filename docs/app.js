@@ -101,7 +101,7 @@ async function pollExt() {
 }
 
 function openExtDialog() {
-  $("ext-repo").href = (CONFIG.REPO_URL || "https://github.com/wesleyhuhuhu/Car-Lister").replace(/\/$/, "");
+  $("ext-download").href = (CONFIG.REPO_URL || "https://github.com/wesleyhuhuhu/Car-Lister").replace(/\/$/, "") + "/releases/latest";
   $("ext-adapters").textContent = state.ext
     ? "Option lookups: " + state.ext.adapters.map((a) => `${a.label} (${a.ready ? "ready" : "not set up yet"})`).join(", ") + "."
     : "";

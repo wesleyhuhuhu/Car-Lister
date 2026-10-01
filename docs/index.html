@@ -79,11 +79,14 @@
       <p>Searching and <strong>Fetch options</strong> run from <em>your</em> browser, so you need the small
          <strong>Car Lister Helper</strong> extension (Chrome, Edge, Brave). Nothing else to install.</p>
       <ol>
-        <li>Download the project (<a id="ext-repo" target="_blank" rel="noopener">GitHub</a> &rarr; Code &rarr; Download ZIP) and unzip it.</li>
-        <li>Open <code>chrome://extensions</code> and switch on <strong>Developer mode</strong>.</li>
-        <li>Click <strong>Load unpacked</strong> and pick the <code>extension</code> folder.</li>
+        <li><a id="ext-download" target="_blank" rel="noopener">Download the latest <code>car-lister-helper-&hellip;.zip</code></a>
+            and unzip it somewhere you'll keep it (Chrome loads the extension from that folder).</li>
+        <li>Open <code>chrome://extensions</code> and switch on <strong>Developer mode</strong> (top right).</li>
+        <li>Click <strong>Load unpacked</strong> and pick the unzipped <code>car-lister-helper-&hellip;</code> folder.</li>
         <li>Reload this page. The badge at the top turns green.</li>
       </ol>
+      <p class="muted"><strong>Updating:</strong> download the new ZIP, unzip it over the old folder (or load the new folder and
+         remove the old one), then press the reload icon on the extension's card in <code>chrome://extensions</code> and reload this page.</p>
       <p class="muted">If the badge stays red, this site's address is probably not listed in the extension's
          <code>manifest.json</code> under <code>content_scripts &rarr; matches</code>. Add it and reload the extension.</p>
       <p id="ext-adapters" class="muted"></p>

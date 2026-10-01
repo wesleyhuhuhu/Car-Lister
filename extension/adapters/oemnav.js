@@ -2,10 +2,11 @@
 // About 2 free checks per day; the second one shows a Cloudflare Turnstile human check. That check is never
 // bypassed: the lookup runs in a visible, focused tab and the person ticks the box themselves.
 // Ported from oem_lookup.py; the build sheet has the same shape as bimmer.work's (codes like "248").
+import { run, sleep, tabExists, TabClosed } from "./tabs.js";
+
 const URL_ = "https://oemnavigations.com/pages/vin-decoder-app";
 const RESULT_WAIT_MS = 90_000;
 const CAPTCHA_WAIT_MS = 120_000;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const LIMIT_WORDS = /limit|no (more )?(free )?(checks|lookups|searches)|remaining|too many|come back|tomorrow/i;
 
 export class OemLimitReached extends Error {}
@@ -90,7 +91,7 @@ export function toBuildSheet(parsed, vin) {
   return sheet;
 }
 
-const run = async (tabId, func, args = []) => (await chrome.scripting.executeScript({ target: { tabId }, func, args }))[0].result;
+const CLOSED = "The oemnavigations.com tab was closed, so the lookup was stopped.";
 
 export async function lookupOem(vin, onMessage = () => {}) {
   const tab = await chrome.tabs.create({ url: URL_, active: true });   // visible: the person may need to tick the human check
@@ -98,6 +99,7 @@ export async function lookupOem(vin, onMessage = () => {}) {
     let form = null;
     for (let i = 0; i < 50 && form !== "ready" && form !== "maintenance"; i++) {
       await sleep(400);
+      if (!(await tabExists(tab.id))) throw new TabClosed(CLOSED);
       try { form = await run(tab.id, pageForm, [null]); } catch { /* loading */ }
     }
     if (form === "maintenance") throw new Error("oemnavigations.com says its VIN decoder is under maintenance.");
@@ -106,6 +108,7 @@ export async function lookupOem(vin, onMessage = () => {}) {
 
     let deadline = Date.now() + RESULT_WAIT_MS, captchaShown = false;
     for (;;) {
+      if (!(await tabExists(tab.id))) throw new TabClosed(CLOSED);   // e.g. closed instead of ticking the human check
       if (Date.now() > deadline) {
         throw new Error(captchaShown
           ? "oemnavigations.com's human check was not completed in time."

@@ -151,7 +151,14 @@ For the page: `GET /status`, `POST /fetch {"vin": "..."}` (202 queued, 409 unava
 - **Search AutoTempest** (the form at the top of the page). The extension opens the results in a background tab, loads every source, reads the cards and decodes the VINs with NHTSA. Results are kept in that browser's `localStorage`, not in the shared database.
 - **Fetch options** for non-BMW cars. The extension calls the manufacturer's site directly (extensions are not subject to CORS, a plain web page is), so there is no Chrome automation involved.
 
-Install (once per browser): `chrome://extensions` > Developer mode > Load unpacked > pick the `extension` folder, then reload the page; the "Extension connected" badge turns green.
+Install (once per browser): download `car-lister-helper-<version>.zip` from the repo's latest GitHub Release, unzip it, then `chrome://extensions` > Developer mode > Load unpacked > pick the unzipped folder, and reload the page; the "Extension connected" badge turns green. (Developing: load the `extension` folder itself.)
+
+Releasing a new version:
+1. Bump `"version"` in `extension/manifest.json`.
+2. `python tools/pack_extension.py` builds `dist/car-lister-helper-<version>.zip` with only the files the browser needs.
+3. Attach it to a GitHub Release, e.g. `gh release create v0.2.0 dist/car-lister-helper-0.2.0.zip --title "Car Lister Helper 0.2.0"`. The page's install dialog links to the latest release.
+
+People who update must press the reload icon on the extension in `chrome://extensions`; Chrome keeps running the old code until then.
 To use it on another site address, add that address to `content_scripts.matches` in `extension/manifest.json`.
 
 | Make | Source | How |

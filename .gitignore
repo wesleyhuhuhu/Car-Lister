@@ -17,3 +17,5 @@ listings.json
 autotempest_debug.html
 autotempest_debug.png
 .env
+# Packed extension ZIPs (attach them to a GitHub Release instead)
+dist/

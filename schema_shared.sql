@@ -145,6 +145,29 @@ language sql immutable as $$
     select case when t ~ '^[0-9]{1,10}$' and t::bigint between lo and hi then t::integer end
 $$;
 
+-- "Is this a whole car?" A real VIN can still be attached to a parts listing ("2022 BMW M3 OEM wheels"),
+-- so the listing itself is checked. Returns a reason, or null for a normal car listing. Keep the word lists
+-- the same as listingProblem() in supabase/functions/submit-listings/handler.mjs (tested there against
+-- every listing in the table: none of them is flagged).
+create or replace function _listing_problem(p_title text, p_price int, p_mileage int, p_make text default null)
+returns text
+language sql immutable as $$
+    select case
+        -- car titles are "<year> <make> <model>"
+        when coalesce(p_title, '') !~ '^\s*(19|20)\d\d\y' then 'title_not_year_make_model'
+        when nullif(btrim(p_make), '') is not null
+             and position(regexp_replace(lower(p_make), '[^a-z0-9]', '', 'g')
+                          in regexp_replace(lower(p_title), '[^a-z0-9]', '', 'g')) = 0 then 'title_make_mismatch'
+        -- always rejected: the title says it is not a whole, driveable car
+        when p_title ~* '\y(for parts|parts only|parts car|part(ing|ed)? ?out|diecast|die-cast|scale model|1:(8|12|18|24|43|64)|brochure|owner''?s manual|sales literature|key ?fob|floor mats?|car cover|shell only|body only|roller only|engine only|motor only|transmission only)\y'
+             then 'looks_like_parts'
+        when p_price is not null and p_price < 500 then 'price_too_low'
+        -- part words only count with another sign (no mileage, or under $5,000). "door" is left out on purpose: "4-Door".
+        when p_title ~* '\y(wheels?|rims?|tires?|tyres?|seats?|bumpers?|hood|fenders?|head ?lights?|head ?lamps?|tail ?lights?|tail ?lamps?|exhaust|intake|turbos?|engine|motor|transmission|gearbox|differential|steering wheel|grille|spoiler|mirrors?|radio|head unit|ecu|module|harness|airbags?)\y'
+             and (p_mileage is null or (p_price is not null and p_price < 5000)) then 'looks_like_parts'
+    end
+$$;
+
 create or replace function submit_listings(p_rows jsonb)
 returns table (inserted int, updated int, skipped int)
 language plpgsql security definer set search_path = public as $$
@@ -173,6 +196,9 @@ begin
         v_title := left(btrim(coalesce(r->>'title', '')), 300);
         v_key := coalesce(v_vin, case when v_url is not null then 'url:' || v_url end);
         if v_key is null or v_title = '' then v_skip := v_skip + 1; continue; end if;
+        if _listing_problem(v_title, _to_int(r->>'price'), _to_int(r->>'mileage'), r->>'make') is not null then
+            v_skip := v_skip + 1; continue;                 -- parts, accessories, or a title that doesn't match the car
+        end if;
 
         insert into listings (listing_key, vin, title, year, make, model, "trim",
                               price, price_text, mileage, mileage_text, source_site, location, listing_url, image_url)
@@ -220,6 +246,7 @@ revoke all on function submit_options(text, jsonb) from public, anon, authentica
 revoke all on function release_vins(text, text[]) from public, anon, authenticated;
 revoke all on function _to_int(text, bigint, bigint) from public, anon, authenticated;
 revoke all on function submit_listings(jsonb) from public, anon, authenticated;
+revoke all on function _listing_problem(text, int, int, text) from public, anon, authenticated;
 grant execute on function count_pending(int, text, text, int) to anon, authenticated;
 grant execute on function claim_pending_vins(text, int, int, text, text, int) to anon, authenticated;
 grant execute on function claim_vin(text, text, int) to anon, authenticated;
