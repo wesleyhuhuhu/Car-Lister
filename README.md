@@ -144,6 +144,25 @@ For the page: `GET /status`, `POST /fetch {"vin": "..."}` (202 queued, 409 unava
 `GET /job?vin=...` (`queued` / `running` / `done` / `failed`, plus `message`). Read listings from the `public_listings` view
 (`GET {SUPABASE_URL}/rest/v1/public_listings` with the anon key); `being_fetched` is true while someone holds a claim, and `options` fills in when a fetch finishes.
 
+## 5. Helper browser extension: search and fetch options from the website
+
+`extension/` is a Chrome/Edge/Brave extension (Manifest V3) that lets the listings page do two things from the visitor's own browser, with no Python:
+
+- **Search AutoTempest** (the form at the top of the page). The extension opens the results in a background tab, loads every source, reads the cards and decodes the VINs with NHTSA. Results are kept in that browser's `localStorage`, not in the shared database.
+- **Fetch options** for non-BMW cars. The extension calls the manufacturer's site directly (extensions are not subject to CORS, a plain web page is), so there is no Chrome automation involved.
+
+Install (once per browser): `chrome://extensions` > Developer mode > Load unpacked > pick the `extension` folder, then reload the page; the "Extension connected" badge turns green.
+To use it on another site address, add that address to `content_scripts.matches` in `extension/manifest.json`.
+
+| Make | Source | How |
+|---|---|---|
+| Chrysler, Dodge, Jeep, Ram, Fiat, Alfa Romeo | original window sticker, `/hostd/windowsticker/getWindowStickerPdf.do?vin=` on the brand sites | plain HTTP, PDF text read with pdf.js (`extension/adapters/stellantis*.js`) |
+| Mercedes-Benz | not set up yet | `extension/adapters/mercedes.js` |
+| Toyota | not set up yet | `extension/adapters/toyota.js` |
+| BMW | bimmer.work / oemnavigations.com | still the Python companion (section 4b) |
+
+Adding a make: implement `lookup(vin, make)` in its adapter (contract in `mercedes.js`), set `ready: true` and add the site's address to `host_permissions`. Test the Stellantis parser with `cd extension && npm i && npm test`.
+
 ## Debug helpers
 
 - `debug_selectors.py`: dumps the AutoTempest page to fix selectors if the site changes.

@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Car Lister Helper",
+  "version": "0.1.0",
+  "description": "Lets the Car Lister website search AutoTempest and fetch factory options (window stickers / build sheets) for a VIN from your own browser.",
+  "minimum_chrome_version": "116",
+  "permissions": ["scripting", "offscreen"],
+  "host_permissions": [
+    "https://www.autotempest.com/*",
+    "https://vpic.nhtsa.dot.gov/*",
+    "https://www.chrysler.com/*",
+    "https://www.dodge.com/*",
+    "https://www.jeep.com/*",
+    "https://www.ramtrucks.com/*",
+    "https://www.fiatusa.com/*",
+    "https://www.alfaromeousa.com/*"
+  ],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://wesleyhuhuhu.github.io/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

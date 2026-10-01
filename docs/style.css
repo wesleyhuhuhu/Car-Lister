@@ -58,3 +58,12 @@ dialog h2 { margin: 0 0 8px; font-size: 18px; }
 pre { background: var(--chip); padding: 10px; border-radius: 8px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
 .muted { color: var(--muted); font-size: 13px; }
 @media (max-width: 520px) { .filters #f-search, .filters #f-options { grid-column: 1 / -1; } }
+
+.pills { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.search { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-top: 16px; box-shadow: var(--shadow); }
+.search h2 { font-size: 15px; margin: 0 0 10px; }
+.search-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+.search-fields button { border-radius: 8px; padding: 8px 10px; cursor: pointer; border: 1px solid var(--accent); }
+.search-fields button[disabled] { opacity: .6; cursor: default; }
+.search p { margin: 10px 0 0; }
+@media (max-width: 520px) { .topbar-inner { height: auto; padding: 8px 0; gap: 8px; } }

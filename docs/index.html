@@ -11,13 +11,36 @@
   <header class="topbar">
     <div class="wrap topbar-inner">
       <h1 id="site-title">Car Lister</h1>
-      <button id="companion-pill" class="pill" type="button" aria-haspopup="dialog">
-        <span class="dot"></span><span id="companion-text">Checking companion…</span>
-      </button>
+      <div class="pills">
+        <button id="ext-pill" class="pill" type="button" aria-haspopup="dialog">
+          <span class="dot"></span><span id="ext-text">Checking extension…</span>
+        </button>
+        <button id="companion-pill" class="pill" type="button" aria-haspopup="dialog" title="Only needed for BMW options">
+          <span class="dot"></span><span id="companion-text">Checking companion…</span>
+        </button>
+      </div>
     </div>
   </header>
 
   <main class="wrap">
+    <form id="search-form" class="search" aria-label="Search for cars">
+      <h2>Search AutoTempest</h2>
+      <div class="search-fields">
+        <input id="s-make" required placeholder="Make (e.g. jeep)" aria-label="Make">
+        <input id="s-model" placeholder="Model (e.g. wrangler)" aria-label="Model">
+        <input id="s-zip" required inputmode="numeric" pattern="\d{5}" maxlength="5" placeholder="ZIP" aria-label="ZIP code">
+        <select id="s-radius" aria-label="Distance">
+          <option value="50">50 miles</option><option value="100">100 miles</option><option value="300">300 miles</option>
+          <option value="500">500 miles</option><option value="state">My state</option><option value="country">Nationwide</option>
+        </select>
+        <input id="s-minyear" type="number" placeholder="Year from" min="1980" max="2100" aria-label="Search year from">
+        <input id="s-maxyear" type="number" placeholder="Year to" min="1980" max="2100" aria-label="Search year to">
+        <input id="s-maxprice" type="number" placeholder="Max price" min="0" step="1000" aria-label="Search max price">
+        <button id="s-go" class="primary" type="submit">Search</button>
+      </div>
+      <p id="s-status" class="muted" role="status" aria-live="polite">Searches run in your own browser through the helper extension. Results stay on this device.</p>
+    </form>
+
     <section class="filters" aria-label="Filters">
       <input id="f-search" type="search" placeholder="Search title, VIN or location" aria-label="Search">
       <input id="f-options" type="search" placeholder="Has option… (e.g. carbon, 2T4, head-up)" aria-label="Option search">
@@ -48,6 +71,24 @@
     <p id="empty" class="empty" hidden>No listings match these filters.</p>
     <p id="error" class="error" hidden></p>
   </main>
+
+  <dialog id="ext-dialog">
+    <form method="dialog">
+      <h2>Install the helper extension</h2>
+      <p>Searching and <strong>Fetch options</strong> run from <em>your</em> browser, so you need the small
+         <strong>Car Lister Helper</strong> extension (Chrome, Edge, Brave). Nothing else to install.</p>
+      <ol>
+        <li>Download the project (<a id="ext-repo" target="_blank" rel="noopener">GitHub</a> &rarr; Code &rarr; Download ZIP) and unzip it.</li>
+        <li>Open <code>chrome://extensions</code> and switch on <strong>Developer mode</strong>.</li>
+        <li>Click <strong>Load unpacked</strong> and pick the <code>extension</code> folder.</li>
+        <li>Reload this page. The badge at the top turns green.</li>
+      </ol>
+      <p class="muted">If the badge stays red, this site's address is probably not listed in the extension's
+         <code>manifest.json</code> under <code>content_scripts &rarr; matches</code>. Add it and reload the extension.</p>
+      <p id="ext-adapters" class="muted"></p>
+      <button class="primary" value="close">Got it</button>
+    </form>
+  </dialog>
 
   <dialog id="companion-dialog">
     <form method="dialog">

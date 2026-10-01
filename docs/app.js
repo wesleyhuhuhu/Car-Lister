@@ -1,4 +1,5 @@
 import { CONFIG } from "./config.js";
+import * as ext from "./extension.js";
 
 const COLUMNS = "listing_key,vin,title,year,make,model,trim,price,price_text,mileage,mileage_text," +
   "source_site,location,listing_url,image_url,options,options_checked_at,updated_at,being_fetched";
@@ -10,7 +11,23 @@ const state = {
   jobs: {},                 // vin -> {state, message}
   pinned: new Set(),        // VINs fetched this visit: stay visible under "Without options" until a filter changes
   companion: { ok: false, busy: false, blocked: 0 },
+  db: [],                   // rows from the shared database
+  local: loadLocal(),       // rows found by this browser's own searches (and options fetched through the extension)
+  ext: null,                // {version, adapters} when the helper extension is installed
 };
+
+function loadLocal() {
+  try { return JSON.parse(localStorage.getItem("carlister.local") || "[]"); } catch { return []; }
+}
+function saveLocal() {
+  try { localStorage.setItem("carlister.local", JSON.stringify(state.local)); } catch { /* storage full or blocked: keep in memory */ }
+}
+// Database rows win; a local row only fills in what the database does not have yet.
+function mergeRows() {
+  const byVin = new Map(state.db.filter((r) => r.vin).map((r) => [r.vin, r]));
+  const extra = state.local.filter((r) => !(r.vin && byVin.has(r.vin) && hasOptions(byVin.get(r.vin))));
+  state.rows = [...state.db.filter((r) => !extra.some((l) => l.vin && l.vin === r.vin)), ...extra];
+}
 
 // ---------------------------------------------------------------- helpers
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -18,6 +35,7 @@ const money = (n, text) => (n != null ? "$" + Number(n).toLocaleString("en-US") 
 const miles = (n, text) => (n != null ? Number(n).toLocaleString("en-US") + " mi" : text || "");
 const isBmw = (r) => /^bmw$/i.test(r.make || "") && /^[A-HJ-NPR-Z0-9]{17}$/i.test(r.vin || "");
 const hasOptions = (r) => Array.isArray(r.options) && r.options.length > 0;
+const adapterOf = (r) => state.ext && state.ext.adapters.find((a) => a.makes.includes(String(r.make || "").toLowerCase()));
 const num = (id) => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
 const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : "");
 
@@ -48,10 +66,71 @@ async function refreshRow(vin) {
   try {
     const [fresh] = await dbGet(`select=${COLUMNS}&vin=eq.${encodeURIComponent(vin)}`);
     if (!fresh) return;
-    const i = state.rows.findIndex((r) => r.vin === vin);
-    if (i >= 0) state.rows[i] = fresh;
+    const i = state.db.findIndex((r) => r.vin === vin);
+    if (i >= 0) state.db[i] = fresh;
+    mergeRows();
     render();
   } catch { /* leave the card as it is */ }
+}
+
+// ---------------------------------------------------------------- extension
+async function pollExt() {
+  const was = !!state.ext;
+  state.ext = await ext.hello();
+  const pill = $("ext-pill");
+  pill.className = "pill " + (state.ext ? "ok" : "off");
+  $("ext-text").textContent = state.ext ? "Extension connected" : "Extension not installed";
+  if (was !== !!state.ext) render();      // fetch buttons depend on it
+}
+
+function openExtDialog() {
+  $("ext-repo").href = (CONFIG.REPO_URL || "https://github.com/wesleyhuhuhu/Car-Lister").replace(/\/$/, "");
+  $("ext-adapters").textContent = state.ext
+    ? "Option lookups: " + state.ext.adapters.map((a) => `${a.label} (${a.ready ? "ready" : "not set up yet"})`).join(", ") + "."
+    : "";
+  $("ext-dialog").showModal();
+}
+
+async function runSearch(e) {
+  e.preventDefault();
+  if (!state.ext) { await pollExt(); if (!state.ext) return openExtDialog(); }
+  const go = $("s-go"), status = $("s-status");
+  go.disabled = true; status.textContent = "Starting…";
+  try {
+    const found = await ext.runJob("search", { params: {
+      make: $("s-make").value.trim(), model: $("s-model").value.trim(), zip: $("s-zip").value.trim(), radius: $("s-radius").value,
+      minyear: num("s-minyear"), maxyear: num("s-maxyear"), maxprice: num("s-maxprice"),
+    } }, (m) => { status.textContent = m; });
+    const now = new Date().toISOString();
+    const known = new Map(state.local.map((r) => [r.listing_key, r]));
+    for (const l of found) {
+      const old = known.get(l.listing_key);
+      known.set(l.listing_key, { ...l, updated_at: now, ...(old && hasOptions(old) ? { options: old.options, option_codes: old.option_codes, build_sheet: old.build_sheet } : {}) });
+    }
+    state.local = [...known.values()];
+    saveLocal(); mergeRows(); fillSelects(); render();
+    status.textContent = `Found ${found.length} listings (${state.local.length} saved on this device).`;
+  } catch (err) {
+    status.textContent = err.message;
+  } finally {
+    go.disabled = false;
+  }
+}
+
+async function fetchOptionsExt(r) {
+  if (!state.ext) { await pollExt(); if (!state.ext) return openExtDialog(); }
+  setJob(r.vin, "running", "Sending to the extension…");
+  try {
+    const res = await ext.runJob("fetchOptions", { vin: r.vin, make: r.make }, (m) => setJob(r.vin, "running", m));
+    const i = state.local.findIndex((l) => l.vin === r.vin);
+    const patch = { options: res.options, option_codes: res.option_codes, build_sheet: res.build_sheet, options_checked_at: new Date().toISOString() };
+    if (i >= 0) state.local[i] = { ...state.local[i], ...patch };
+    else state.local.push({ ...r, ...patch, local: true });
+    saveLocal(); state.pinned.add(r.vin); mergeRows();
+    setJob(r.vin, "done", `${res.options.length} options found.`);
+  } catch (err) {
+    setJob(r.vin, "failed", err.message);
+  }
 }
 
 // ---------------------------------------------------------------- companion
@@ -185,6 +264,7 @@ function highlight(text, ts) {
 
 function optionsBlock(r, ts) {
   const items = r.options.map((o) => {
+    if (!r.option_codes || !r.option_codes.length) return `<li>${highlight(o, ts)}</li>`;   // window stickers have names, not codes
     const [code, ...rest] = o.split(" ");
     return `<li><b>${highlight(code, ts)}</b>${highlight(rest.join(" "), ts)}</li>`;
   }).join("");
@@ -196,11 +276,16 @@ function actionArea(r) {
   const link = safeUrl(r.listing_url)
     ? `<a class="btn" href="${esc(safeUrl(r.listing_url))}" target="_blank" rel="noopener noreferrer">View listing${r.source_site ? " on " + esc(r.source_site) : ""}</a>` : "";
   let fetchBit = "";
+  const working = job && (job.state === "queued" || job.state === "running");
+  const validVin = /^[A-HJ-NPR-Z0-9]{17}$/i.test(r.vin || "");
   if (!hasOptions(r) && isBmw(r)) {
-    const working = job && (job.state === "queued" || job.state === "running");
     if (working) fetchBit = `<button class="btn primary" disabled>Fetching…</button>`;
     else if (r.being_fetched) fetchBit = `<button class="btn" disabled>Being fetched by someone…</button>`;
     else fetchBit = `<button class="btn primary" data-fetch="${esc(r.vin)}">Fetch options</button>`;
+  } else if (!hasOptions(r) && validVin && adapterOf(r)) {
+    if (working) fetchBit = `<button class="btn primary" disabled>Fetching…</button>`;
+    else if (!adapterOf(r).ready) fetchBit = `<button class="btn" disabled title="No lookup site is set up for this make yet">Lookup not set up</button>`;
+    else fetchBit = `<button class="btn primary" data-fetch-ext="${esc(r.vin)}">Fetch options</button>`;
   }
   let status = "";
   if (job && job.message) {
@@ -246,8 +331,12 @@ function wire() {
   });
   $("grid").addEventListener("click", (e) => {
     const b = e.target.closest("[data-fetch]");
-    if (b) fetchOptions(b.dataset.fetch);
+    if (b) return fetchOptions(b.dataset.fetch);
+    const x = e.target.closest("[data-fetch-ext]");
+    if (x) { const r = state.rows.find((row) => row.vin === x.dataset.fetchExt); if (r) fetchOptionsExt(r); }
   });
+  $("search-form").addEventListener("submit", runSearch);
+  $("ext-pill").addEventListener("click", openExtDialog);
   $("companion-pill").addEventListener("click", openCompanionDialog);
 }
 
@@ -255,17 +344,18 @@ async function main() {
   document.title = CONFIG.SITE_TITLE; $("site-title").textContent = CONFIG.SITE_TITLE;
   wire();
   pollStatus(); setInterval(pollStatus, 8000);
+  pollExt(); setInterval(pollExt, 15000);
   if (CONFIG.SUPABASE_URL.includes("YOUR-PROJECT")) {
     $("error").hidden = false; $("error").textContent = "Set SUPABASE_URL and SUPABASE_ANON_KEY in config.js.";
     return;
   }
   $("count").textContent = "Loading listings…";
   try {
-    state.rows = await loadAll();
-    fillSelects(); render();
+    state.db = await loadAll();
   } catch (e) {
-    $("count").textContent = ""; $("error").hidden = false;
-    $("error").textContent = "Could not load listings. " + e.message;
+    $("error").hidden = false;
+    $("error").textContent = "Could not load shared listings (" + e.message + "). Showing what is saved on this device.";
   }
+  mergeRows(); fillSelects(); render();
 }
 main();

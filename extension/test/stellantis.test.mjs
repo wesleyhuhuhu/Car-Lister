@@ -1,0 +1,21 @@
+import fs from "fs";
+import assert from "assert";
+import { pdfLines } from "./extract.mjs";
+import { parseStellantisSticker, optionStrings } from "../adapters/stellantis_parse.js";
+
+const sheet = parseStellantisSticker(await pdfLines(fs.readFileSync(new URL("./ram-1500.pdf", import.meta.url))));
+console.log(JSON.stringify(sheet.Details, null, 1));
+console.log(optionStrings(sheet).slice(0, 14));
+assert.equal(sheet.Details["Model Year"], "2022");
+assert.equal(sheet.Details["Exterior Color"], "Bright White Clear-Coat Exterior Paint");
+assert.equal(sheet.Details["Base Price"], "$64,095");
+assert.equal(sheet.Details["Total Price"], "$77,355");
+assert.equal(sheet.Details["Destination Charge"], "$1,795");
+assert.ok(sheet.Options["28M"]);
+const tow = sheet.Optional.find((o) => o.name === "Trailer-Tow Group");
+assert.equal(tow.price, "$995");
+assert.equal(tow.package, "28M");
+assert.equal(tow.includes.length, 4);
+assert.ok(sheet.Standard.includes("Heated Steering Wheel"));
+assert.ok(!sheet.Standard.some((s) => /^[A-Z/ ]+FEATURES$/.test(s)));
+console.log("ok: optional", sheet.Optional.length, "standard", sheet.Standard.length);
