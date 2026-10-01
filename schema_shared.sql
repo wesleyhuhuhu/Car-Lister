@@ -232,7 +232,13 @@ create or replace view public_listings with (security_invoker = false) as
 select listing_key, vin, title, year, make, model, "trim",
        price, price_text, mileage, mileage_text, source_site, location, listing_url, image_url,
        options, option_codes, build_sheet, options_checked_at, first_seen_at, updated_at,
-       (build_sheet is null and claimed_at is not null and claimed_at > now() - interval '30 minutes') as being_fetched
+       (build_sheet is null and claimed_at is not null and claimed_at > now() - interval '30 minutes') as being_fetched,
+       -- paint and interior as the looked-up build sheet names them (bimmer.work / oemnavigations: Color, Upholstery;
+       -- Stellantis window stickers: Details."Exterior Color" / "Interior Color"), so the page can show them on the card
+       nullif(btrim(coalesce(build_sheet ->> 'Color', build_sheet -> 'Details' ->> 'Exterior Color',
+                             build_sheet -> 'Details' ->> 'Color')), '') as color,
+       nullif(btrim(coalesce(build_sheet ->> 'Upholstery', build_sheet -> 'Details' ->> 'Interior Color',
+                             build_sheet -> 'Details' ->> 'Upholstery')), '') as interior
 from listings;
 revoke all on public_listings from public, anon, authenticated;
 grant select on public_listings to anon, authenticated;

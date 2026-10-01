@@ -46,6 +46,12 @@ SELECTORS = {
     "share_button": ".share-link button",  # onclick carries the VIN
 }
 
+# AutoTempest adds a "Results beyond N mi" section (on by default) holding nationwide results, with its
+# own "More" button. Cards and buttons inside it are skipped, so a 50-mile search stays within 50 miles.
+EXTENDED = "#extended-results, section[data-code=extended]"
+# Each card says how far it is, e.g. "Costa Mesa, CA (21 mi. from 91748)"; used as a second check.
+DISTANCE_RE = re.compile(r"\((\d[\d,]*)\s*mi\.? from", re.I)
+
 # VIN is embedded in the Share button's onclick, e.g.:
 #   window.AT.shareListing(`cs`, `4T1KZ1AK8LU045992`, `Toyota`, `camry`)
 VIN_FROM_ONCLICK_RE = re.compile(r"shareListing\(`[^`]*`,\s*`([A-Z0-9]{11,17})`")
@@ -243,7 +249,8 @@ def scrape_search(
         page.wait_for_timeout(int(extra_wait_seconds * 1000))
 
         for _ in range(click_more_rounds):
-            more_buttons = page.query_selector_all("button.more-results")
+            more_buttons = [b for b in page.query_selector_all("button.more-results")
+                            if not b.evaluate(f"(el) => !!el.closest('{EXTENDED}')")]
             clicked = False
             for btn in more_buttons:
                 try:
@@ -256,8 +263,19 @@ def scrape_search(
             if not clicked:
                 break
 
+        try:
+            max_miles = int(str(urllib.parse.parse_qs(urllib.parse.urlparse(search_url).query).get("radius", ["0"])[0]))
+        except ValueError:
+            max_miles = 0                     # state / nationwide / anywhere: no distance limit
         rows = page.query_selector_all(SELECTORS["row"])
         for section in rows:
+            if section.evaluate(f"(el) => !!el.closest('{EXTENDED}')"):
+                continue                      # "Results beyond N mi"
+            if max_miles:
+                dist_el = section.query_selector(".distance")
+                m = DISTANCE_RE.search(dist_el.inner_text() if dist_el else "")
+                if m and int(m.group(1).replace(",", "")) > max_miles:
+                    continue
             listing = _extract_row(page, section)
             if listing is None or listing.listing_url in seen_urls:
                 continue

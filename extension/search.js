@@ -2,6 +2,9 @@
 // the per-source results to load, click each "More results" button, read the cards, close the tab.
 // The selectors mirror autotempest_scraper.py; if AutoTempest changes its markup, fix both.
 const ROW = "li.result-list-item section.search-result";
+// AutoTempest adds a "Results beyond N mi" section (#extended-results, on by default) with nationwide results and
+// its own "More" button. Those cards and that button are skipped so a 50-mile search stays within 50 miles.
+const EXTENDED = "#extended-results, section[data-code=extended]";
 const LOCALIZATION = new Set(["state", "country", "nationwide", "any"]);
 const SITE_NAMES = {
   te: "AutoTempest", hem: "Hemmings", hemc: "Hemmings", cs: "CarSoup", cv: "Carvana", cm: "Cars.com", cmf: "Cars.com",
@@ -23,6 +26,7 @@ export function cleanParams(p) {
     zip: text(p.zip, /^\d{5}$/),
     minyear: int(p.minyear), maxyear: int(p.maxyear), minprice: int(p.minprice), maxprice: int(p.maxprice),
     minmiles: int(p.minmiles), maxmiles: int(p.maxmiles),
+    trim_kw: typeof p.trim === "string" && /^[\w .+/-]{1,60}$/.test(p.trim.trim()) ? p.trim.trim() : null,   // free-text trim keyword
   };
   if (!q.make || !q.zip) throw new Error("A make and a 5-digit ZIP code are needed.");
   const radius = String(p.radius ?? "50").trim().toLowerCase();
@@ -39,21 +43,24 @@ export function searchUrl(params) {
 }
 
 // ---- functions below run inside the AutoTempest tab (they must not use anything from this module)
-function pageRowCount(sel) { return document.querySelectorAll(sel).length; }
+function pageRowCount(sel, extended) { return [...document.querySelectorAll(sel)].filter((s) => !s.closest(extended)).length; }
 
-function pageClickMore() {
+function pageClickMore(extended) {
   let clicked = 0;
   for (const b of document.querySelectorAll("button.more-results")) {
-    if (b.offsetParent !== null && !b.disabled) { b.click(); clicked++; }
+    if (b.offsetParent !== null && !b.disabled && !b.closest(extended)) { b.click(); clicked++; }
   }
   return clicked;
 }
 
-function pageExtract(sel, siteNames) {
+function pageExtract(sel, siteNames, extended, maxMiles) {
   const VIN = /shareListing\(`[^`]*`,\s*`([A-Z0-9]{11,17})`/;
   const seen = new Set();
   const out = [];
   for (const s of document.querySelectorAll(sel)) {
+    if (s.closest(extended)) continue;                                   // "Results beyond N mi"
+    const dist = /\((\d[\d,]*)\s*mi\.? from/i.exec((s.querySelector(".distance") || {}).textContent || "");
+    if (maxMiles && dist && Number(dist[1].replace(/,/g, "")) > maxMiles) continue;   // belt and braces
     const a = s.querySelector(".title-wrap.listing-title a.source-link");
     let url = a && a.getAttribute("href");
     if (!url) continue;
@@ -87,25 +94,51 @@ export async function runSearch(params, { maxRounds = 15, onProgress = () => {} 
     let n = 0;
     for (let i = 0; i < 60 && n === 0; i++) {            // page load + first cards
       await sleep(500);
-      try { n = await run(tab.id, pageRowCount, [ROW]); } catch { /* still navigating */ }
+      try { n = await run(tab.id, pageRowCount, [ROW, EXTENDED]); } catch { /* still navigating */ }
     }
     if (n === 0) throw new Error("AutoTempest showed no results (no matches, or it asked for a human check; open it once in a tab).");
 
     let last = -1, stable = 0;                           // sources load independently: wait until the count stops growing (~4 s)
     for (let i = 0; i < 40 && stable < 8; i++) {
       await sleep(500);
-      n = await run(tab.id, pageRowCount, [ROW]);
+      n = await run(tab.id, pageRowCount, [ROW, EXTENDED]);
       stable = n === last ? stable + 1 : 0;
       last = n;
       if (i % 4 === 0) onProgress(`Loading results… ${n} so far`);
     }
     for (let round = 1; round <= maxRounds; round++) {
-      if (!(await run(tab.id, pageClickMore))) break;
+      if (!(await run(tab.id, pageClickMore, [EXTENDED]))) break;
       await sleep(1800);
-      onProgress(`Loading more results (${round})… ${await run(tab.id, pageRowCount, [ROW])} so far`);
+      onProgress(`Loading more results (${round})… ${await run(tab.id, pageRowCount, [ROW, EXTENDED])} so far`);
     }
-    return await run(tab.id, pageExtract, [ROW, SITE_NAMES]);
+    const radius = Number(cleanParams(params).radius) || 0;              // 0 = state / nationwide / anywhere
+    return await run(tab.id, pageExtract, [ROW, SITE_NAMES, EXTENDED, radius]);
   } finally {
     chrome.tabs.remove(tab.id).catch(() => {});
   }
+}
+
+// ---- AutoTempest's own make / model lists (their slugs are what the results URL needs).
+// The site can't call these itself (no CORS), so the page asks the extension. Cached for the worker's lifetime.
+const listCache = new Map();
+async function atJson(path) {
+  if (!listCache.has(path)) {
+    listCache.set(path, fetch("https://www.autotempest.com" + path, { credentials: "omit" }).then((r) => {
+      if (!r.ok) throw new Error(`AutoTempest answered HTTP ${r.status}`);
+      return r.json();
+    }).catch((e) => { listCache.delete(path); throw e; }));
+  }
+  return listCache.get(path);
+}
+// -> { popular: [[slug, name]], all: [[slug, name]] }
+export async function getMakes() {
+  const j = await atJson("/api/get-makes?popularMakes=true");
+  return { popular: j.popularMakes || [], all: j.allMakes || [] };
+}
+// -> { popular: [[slug, name, level, fromYear, toYear]], all: [...] }; level 0 = a group like "3 Series", 1-2 = models in it
+export async function getModels(make) {
+  if (!/^[a-z0-9]{1,40}$/.test(make || "")) throw new Error("bad make");
+  const j = await atJson(`/api/get-models/${make}?popularModels=true`);
+  const slim = (list) => (list || []).map((m) => m.slice(0, 5));
+  return { popular: slim(j.popularModels), all: slim(j.allModels) };
 }

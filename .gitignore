@@ -19,3 +19,6 @@ autotempest_debug.png
 .env
 # Packed extension ZIPs (attach them to a GitHub Release instead)
 dist/
+
+# Backups made before db_pull.py merges the database in
+listings.backup-*

@@ -4,72 +4,165 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Car Lister</title>
-  <meta name="description" content="Browse car listings with factory options.">
+  <meta name="description" content="Every listing from every major site, with the factory options decoded from each VIN.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="wrap topbar-inner">
-      <h1 id="site-title">Car Lister</h1>
+      <a class="brand" href="./">
+        <svg class="brand-mark" viewBox="0 0 128 128" aria-hidden="true">
+          <rect x="4" y="4" width="120" height="120" rx="28" fill="currentColor"/>
+          <path d="M22 78 L30 56 Q33 48 42 48 L86 48 Q95 48 98 56 L106 78 Q110 79 110 84 L110 92 Q110 96 106 96 L22 96 Q18 96 18 92 L18 84 Q18 79 22 78 Z" fill="#fff"/>
+          <path d="M37 76 L42 60 Q43 57 46 57 L82 57 Q85 57 86 60 L91 76 Z" fill="currentColor"/>
+          <circle cx="38" cy="96" r="11" fill="#fff" stroke="currentColor" stroke-width="6"/>
+          <circle cx="90" cy="96" r="11" fill="#fff" stroke="currentColor" stroke-width="6"/>
+        </svg>
+        <span id="site-title">Car Lister</span>
+      </a>
       <div class="pills">
         <button id="ext-pill" class="pill" type="button" aria-haspopup="dialog">
           <span class="dot"></span><span id="ext-text">Checking extension…</span>
         </button>
-        <button id="companion-pill" class="pill" type="button" aria-haspopup="dialog" title="Only needed for BMW options">
-          <span class="dot"></span><span id="companion-text">Checking companion…</span>
+        <button id="companion-pill" class="pill pill--quiet" type="button" aria-haspopup="dialog" title="Only needed for BMW options without the extension">
+          <span class="dot"></span><span id="companion-text">Companion…</span>
         </button>
       </div>
     </div>
   </header>
 
-  <main class="wrap">
-    <form id="search-form" class="search" aria-label="Search for cars">
-      <h2>Search AutoTempest</h2>
-      <div class="search-fields">
-        <input id="s-make" required placeholder="Make (e.g. jeep)" aria-label="Make">
-        <input id="s-model" placeholder="Model (e.g. wrangler)" aria-label="Model">
-        <input id="s-zip" required inputmode="numeric" pattern="\d{5}" maxlength="5" placeholder="ZIP" aria-label="ZIP code">
-        <select id="s-radius" aria-label="Distance">
-          <option value="50">50 miles</option><option value="100">100 miles</option><option value="300">300 miles</option>
-          <option value="500">500 miles</option><option value="state">My state</option><option value="country">Nationwide</option>
-        </select>
-        <input id="s-minyear" type="number" placeholder="Year from" min="1980" max="2100" aria-label="Search year from">
-        <input id="s-maxyear" type="number" placeholder="Year to" min="1980" max="2100" aria-label="Search year to">
-        <input id="s-maxprice" type="number" placeholder="Max price" min="0" step="1000" aria-label="Search max price">
-        <button id="s-go" class="primary" type="submit">Search</button>
+  <section class="hero">
+    <div class="wrap">
+      <form id="search-form" class="search" aria-labelledby="search-title">
+        <div class="search-head">
+          <h1 id="search-title">Search for all listings</h1>
+          <p class="search-sub">One search across Cars.com, CarGurus, Carvana, eBay, TrueCar and more. Results are added to the listings below for everyone.</p>
+        </div>
+        <div class="search-fields">
+          <label class="field">
+            <span>Make</span>
+            <select id="s-make" required><option value="">Loading makes…</option></select>
+          </label>
+          <label class="field">
+            <span>Model</span>
+            <select id="s-model" disabled><option value="">Pick a make</option></select>
+          </label>
+          <label class="field">
+            <span>Trim <em>optional</em></span>
+            <input id="s-trim" placeholder="Any trim" maxlength="60" autocomplete="off">
+          </label>
+          <label class="field field--zip">
+            <span>ZIP</span>
+            <input id="s-zip" required inputmode="numeric" pattern="\d{5}" maxlength="5" placeholder="91748" autocomplete="postal-code">
+          </label>
+          <label class="field">
+            <span>Distance</span>
+            <select id="s-radius">
+              <option value="25">25 miles</option><option value="50" selected>50 miles</option><option value="100">100 miles</option>
+              <option value="300">300 miles</option><option value="500">500 miles</option><option value="1000">1,000 miles</option>
+              <option value="state">My state</option><option value="country">Nationwide</option>
+            </select>
+          </label>
+          <label class="field field--year">
+            <span>Year from</span>
+            <input id="s-minyear" type="number" placeholder="Any" min="1980" max="2100">
+          </label>
+          <label class="field field--year">
+            <span>Year to</span>
+            <input id="s-maxyear" type="number" placeholder="Any" min="1980" max="2100">
+          </label>
+          <label class="field">
+            <span>Max price</span>
+            <input id="s-maxprice" type="number" placeholder="No max" min="0" step="1000">
+          </label>
+          <button id="s-go" class="btn btn--primary btn--lg" type="submit">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            Search
+          </button>
+        </div>
+        <p id="s-status" class="search-status" role="status" aria-live="polite">Searches run in your browser through the Car Lister Helper extension.</p>
+      </form>
+    </div>
+  </section>
+
+  <main class="wrap layout">
+    <aside class="sidebar" aria-label="Filters">
+      <details id="filters-panel" class="filters" open>
+        <summary><span>Filters</span><span id="filter-count" class="filter-count" hidden></span></summary>
+        <div class="filters-body">
+          <label class="field"><span>Keyword</span>
+            <input id="f-search" type="search" placeholder="Title, VIN, dealer, city"></label>
+          <label class="field"><span>Has option</span>
+            <input id="f-options" type="search" placeholder="carbon, 2T4, head-up"></label>
+
+          <div class="group">
+            <label class="field"><span>Make</span>
+              <select id="f-make"><option value="">All makes</option></select></label>
+            <label class="field"><span>Model</span>
+              <select id="f-model" disabled><option value="">Select a make first</option></select></label>
+            <label class="field"><span>Trim</span>
+              <select id="f-trim" disabled><option value="">Select a model first</option></select></label>
+          </div>
+
+          <div class="group">
+            <div class="pair">
+              <label class="field"><span>Near ZIP</span>
+                <input id="f-zip" inputmode="numeric" pattern="\d{5}" maxlength="5" placeholder="ZIP" autocomplete="postal-code"></label>
+              <label class="field"><span>Within</span>
+                <select id="f-radius">
+                  <option value="">Any</option><option value="10">10 mi</option><option value="25">25 mi</option>
+                  <option value="50">50 mi</option><option value="100">100 mi</option><option value="200">200 mi</option>
+                  <option value="500">500 mi</option><option value="1000">1,000 mi</option>
+                </select></label>
+            </div>
+            <p id="f-zip-note" class="hint" hidden></p>
+          </div>
+
+          <div class="group">
+            <div class="pair">
+              <label class="field"><span>Year from</span><input id="f-year-min" type="number" placeholder="Any" min="1980" max="2100"></label>
+              <label class="field"><span>Year to</span><input id="f-year-max" type="number" placeholder="Any" min="1980" max="2100"></label>
+            </div>
+            <div class="pair">
+              <label class="field"><span>Max price</span><input id="f-price-max" type="number" placeholder="No max" min="0" step="1000"></label>
+              <label class="field"><span>Max miles</span><input id="f-miles-max" type="number" placeholder="No max" min="0" step="1000"></label>
+            </div>
+          </div>
+
+          <label class="field"><span>Factory options</span>
+            <select id="f-has">
+              <option value="">Any</option>
+              <option value="with">Fetched</option>
+              <option value="without">Not fetched yet</option>
+            </select></label>
+
+          <button id="f-reset" type="button" class="btn btn--ghost btn--block">Clear filters</button>
+        </div>
+      </details>
+    </aside>
+
+    <section class="results" aria-label="Listings">
+      <div class="toolbar">
+        <p id="count" class="count" role="status" aria-live="polite"></p>
+        <label class="sort"><span>Sort</span>
+          <select id="f-sort">
+            <option value="new">Newest first</option>
+            <option value="price-asc">Price: low to high</option>
+            <option value="price-desc">Price: high to low</option>
+            <option value="miles-asc">Mileage: low to high</option>
+            <option value="year-desc">Year: newest</option>
+            <option value="distance" disabled>Distance: nearest</option>
+          </select>
+        </label>
       </div>
-      <p id="s-status" class="muted" role="status" aria-live="polite">Searches run in your own browser through the helper extension.</p>
-    </form>
-
-    <section class="filters" aria-label="Filters">
-      <input id="f-search" type="search" placeholder="Search title, VIN or location" aria-label="Search">
-      <input id="f-options" type="search" placeholder="Has option… (e.g. carbon, 2T4, head-up)" aria-label="Option search">
-      <select id="f-make" aria-label="Make"><option value="">All makes</option></select>
-      <select id="f-model" aria-label="Model"><option value="">All models</option></select>
-      <select id="f-trim" aria-label="Trim"><option value="">All trims</option></select>
-      <input id="f-year-min" type="number" placeholder="Year from" min="1980" max="2100" aria-label="Year from">
-      <input id="f-year-max" type="number" placeholder="Year to" min="1980" max="2100" aria-label="Year to">
-      <input id="f-price-max" type="number" placeholder="Max price" min="0" step="1000" aria-label="Max price">
-      <input id="f-miles-max" type="number" placeholder="Max mileage" min="0" step="1000" aria-label="Max mileage">
-      <select id="f-has" aria-label="Options status">
-        <option value="">Options: any</option>
-        <option value="with">With options</option>
-        <option value="without">Without options</option>
-      </select>
-      <select id="f-sort" aria-label="Sort">
-        <option value="new">Newest first</option>
-        <option value="price-asc">Price: low to high</option>
-        <option value="price-desc">Price: high to low</option>
-        <option value="miles-asc">Mileage: low to high</option>
-        <option value="year-desc">Year: newest</option>
-      </select>
-      <button id="f-reset" type="button" class="ghost">Reset</button>
+      <div id="grid" class="grid"></div>
+      <p id="more-wrap" class="more-wrap" hidden><button id="more" type="button" class="btn btn--ghost">Show more</button></p>
+      <p id="empty" class="empty" hidden>No listings match these filters.</p>
+      <p id="error" class="error" hidden></p>
     </section>
-
-    <p id="count" class="count" role="status" aria-live="polite"></p>
-    <section id="grid" class="grid" aria-label="Listings"></section>
-    <p id="empty" class="empty" hidden>No listings match these filters.</p>
-    <p id="error" class="error" hidden></p>
   </main>
 
   <dialog id="ext-dialog">
@@ -89,16 +182,15 @@
       <p class="muted">If the badge stays red, this site's address is probably not listed in the extension's
          <code>manifest.json</code> under <code>content_scripts &rarr; matches</code>. Add it and reload the extension.</p>
       <p id="ext-adapters" class="muted"></p>
-      <button class="primary" value="close">Got it</button>
+      <button class="btn btn--primary" value="close">Got it</button>
     </form>
   </dialog>
 
   <dialog id="companion-dialog">
     <form method="dialog">
       <h2>Fetch options on your computer</h2>
-      <p>The <strong>Fetch options</strong> button looks a VIN up from <em>your</em> computer and network,
-         then shares the result here. That needs a small helper app running on your machine.
-         The project already includes the settings it needs, so there is nothing to configure.</p>
+      <p>Without the extension, BMW options can be looked up by a small helper app on <em>your</em> computer,
+         which then shares the result here. The extension is the easier way; this is the alternative.</p>
       <ol>
         <li>Install <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python</a>,
             <a href="https://git-scm.com/downloads" target="_blank" rel="noopener">Git</a> and Google Chrome.</li>
@@ -111,10 +203,10 @@ pip install requests playwright truststore</pre>
           <span class="muted">macOS / Linux: use <code>source .venv/bin/activate</code> instead of the second line.</span></li>
         <li>Start the helper and leave it running:
           <pre id="companion-cmd"></pre></li>
-        <li>Come back to this page. The badge at the top right turns green, and Fetch options will work.</li>
+        <li>Come back to this page. The badge at the top turns green, and Fetch options will work.</li>
       </ol>
       <p class="muted">Works in Chrome, Edge and Firefox. Safari blocks pages from talking to local apps.</p>
-      <button class="primary" value="close">Got it</button>
+      <button class="btn btn--primary" value="close">Got it</button>
     </form>
   </dialog>
 

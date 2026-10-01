@@ -101,6 +101,7 @@ def main():
     parser = argparse.ArgumentParser(description="Scrape AutoTempest into listings.json / listings.csv.")
     parser.add_argument("--make", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--trim", default=None, help='Trim keyword, e.g. "Competition" (sent as trim_kw)')
     parser.add_argument("--zip", required=True)
     parser.add_argument("--radius", type=str, default="50",
                          help="Miles (25/50/100/300/500/1000), or 'state', 'country' (nationwide), or 'any' (anywhere)")
@@ -123,7 +124,7 @@ def main():
     args = parser.parse_args()
 
     search_url = build_search_url(
-        make=args.make, model=args.model, zip=args.zip, radius=args.radius,
+        make=args.make, model=args.model, zip=args.zip, radius=args.radius, trim_kw=args.trim,
         minyear=args.minyear, maxyear=args.maxyear,
         minprice=args.minprice, maxprice=args.maxprice,
     )

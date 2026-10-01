@@ -1,17 +1,23 @@
 import { CONFIG } from "./config.js";
 import * as ext from "./extension.js";
 
-const COLUMNS = "listing_key,vin,title,year,make,model,trim,price,price_text,mileage,mileage_text," +
-  "source_site,location,listing_url,image_url,options,options_checked_at,updated_at,being_fetched";
-const PAGE = 1000;
+const BASE_COLUMNS = "listing_key,vin,title,year,make,model,trim,price,price_text,mileage,mileage_text," +
+  "source_site,location,listing_url,image_url,options,option_codes,options_checked_at,updated_at,being_fetched";
+// color / interior come from schema_shared.sql's public_listings view; older databases don't have them yet.
+let COLUMNS = BASE_COLUMNS + ",color,interior";
+const PAGE = 1000;          // rows per database request
+const SHOW_STEP = 60;       // cards rendered per "Show more"
 const $ = (id) => document.getElementById(id);
 
 const state = {
   rows: [],
   jobs: {},                 // vin -> {state, message}
-  pinned: new Set(),        // VINs fetched this visit: stay visible under "Without options" until a filter changes
+  pinned: new Set(),        // VINs fetched this visit: stay visible under "Not fetched yet" until a filter changes
   companion: { ok: false, busy: false, blocked: 0 },
   ext: null,                // {version, adapters} when the helper extension is installed
+  near: null,               // { origin: [lat, lon], radius: miles | null } from the "Near ZIP" filter
+  shown: SHOW_STEP,
+  makesLoaded: false,
 };
 
 // The shared database is the only source of listings: searches and fetched options are saved there and the
@@ -30,6 +36,14 @@ const hasOptions = (r) => Array.isArray(r.options) && r.options.length > 0;
 const adapterOf = (r) => state.ext && state.ext.adapters.find((a) => a.makes.includes(String(r.make || "").toLowerCase()));
 const num = (id) => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
 const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : "");
+const same = (a, b) => String(a || "").toLowerCase().replace(/[^a-z0-9]/g, "") === String(b || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+// NHTSA spells makes in capitals ("MERCEDES-BENZ"); show them the way people write them.
+const KEEP_CAPS = new Set(["BMW", "GMC", "MINI", "RAM", "AMC", "SRT"]);
+function prettyMake(m) {
+  if (!m || m !== m.toUpperCase() || KEEP_CAPS.has(m)) return m || "";
+  return m.toLowerCase().replace(/(^|[\s-])[a-z]/g, (c) => c.toUpperCase());
+}
 
 function dbHeaders() {
   const h = { apikey: CONFIG.SUPABASE_ANON_KEY };
@@ -40,7 +54,11 @@ function dbHeaders() {
 // ---------------------------------------------------------------- database
 async function dbGet(query, extra = {}) {
   const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/public_listings?${query}`, { headers: { ...dbHeaders(), ...extra } });
-  if (!res.ok) throw new Error(`Database error ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(`Database error ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
@@ -55,7 +73,13 @@ async function rpc(name, args) {
 async function loadAll() {
   const rows = [];
   for (let from = 0; ; from += PAGE) {
-    const batch = await dbGet(`select=${COLUMNS}&order=updated_at.desc`, { Range: `${from}-${from + PAGE - 1}` });
+    let batch;
+    try {
+      batch = await dbGet(`select=${COLUMNS}&order=updated_at.desc`, { Range: `${from}-${from + PAGE - 1}` });
+    } catch (e) {
+      if (e.status === 400 && COLUMNS !== BASE_COLUMNS) { COLUMNS = BASE_COLUMNS; return loadAll(); }   // view not updated yet
+      throw e;
+    }
     rows.push(...batch);
     if (batch.length < PAGE) break;
   }
@@ -72,6 +96,53 @@ async function refreshRow(vin) {
   } catch { /* leave the card as it is */ }
 }
 
+// ---------------------------------------------------------------- distance ("Near ZIP")
+// docs/geo.json is built by tools/build_geo.py from the US Census: ZIP -> [lat, lon] and "ST|cityname" -> [lat, lon].
+let geo = null, geoLoading = null;
+function loadGeo() {
+  geoLoading = geoLoading || fetch("geo.json").then((r) => { if (!r.ok) throw new Error("geo.json " + r.status); return r.json(); })
+    .then((g) => { geo = g; return g; }).catch((e) => { geoLoading = null; throw e; });
+  return geoLoading;
+}
+// Must normalise exactly like key() in tools/build_geo.py.
+function geoKey(st, city) {
+  let c = city.toLowerCase().trim().replace(/\btownship\b|\btwp\.?/g, "");
+  c = c.replace(/saint /g, "st ").replace(/sainte /g, "ste ").replace(/mount /g, "mt ").replace(/fort /g, "ft ");
+  return st.toUpperCase() + "|" + c.replace(/[^a-z0-9]/g, "");
+}
+function placeOf(r) {
+  if (r._geo !== undefined) return r._geo;
+  const m = /^(.*?),\s*([A-Z]{2})\b/.exec(String(r.location || "").split(" — ")[0].trim());
+  r._geo = m && geo ? geo.places[geoKey(m[2], m[1])] || null : null;
+  return r._geo;
+}
+function distanceMiles([la1, lo1], [la2, lo2]) {
+  const rad = Math.PI / 180, dLa = (la2 - la1) * rad, dLo = (lo2 - lo1) * rad;
+  const a = Math.sin(dLa / 2) ** 2 + Math.cos(la1 * rad) * Math.cos(la2 * rad) * Math.sin(dLo / 2) ** 2;
+  return 3958.8 * 2 * Math.asin(Math.sqrt(a));
+}
+
+async function updateNear() {
+  const zip = $("f-zip").value.trim(), radius = num("f-radius"), note = $("f-zip-note");
+  note.hidden = true; note.className = "hint";
+  if (!/^\d{5}$/.test(zip)) {
+    state.near = null;
+    if (zip) { note.hidden = false; note.textContent = "Enter a 5-digit ZIP."; }
+  } else {
+    try {
+      await loadGeo();
+      const origin = geo.zips[zip];
+      if (!origin) { state.near = null; note.hidden = false; note.className = "hint is-bad"; note.textContent = `ZIP ${zip} wasn't found.`; }
+      else state.near = { origin, radius };
+    } catch {
+      state.near = null; note.hidden = false; note.className = "hint is-bad"; note.textContent = "Distances couldn't be loaded.";
+    }
+  }
+  const distOpt = $("f-sort").querySelector('option[value="distance"]');
+  distOpt.disabled = !state.near;
+  if (!state.near && $("f-sort").value === "distance") $("f-sort").value = "new";
+}
+
 // ---------------------------------------------------------------- extension
 async function pollExt() {
   const was = !!state.ext;
@@ -79,7 +150,7 @@ async function pollExt() {
   const pill = $("ext-pill");
   pill.className = "pill " + (state.ext ? "ok" : "off");
   $("ext-text").textContent = state.ext ? "Extension connected" : "Extension not installed";
-  if (was !== !!state.ext) render();      // fetch buttons depend on it
+  if (was !== !!state.ext) { render(); loadMakes(); }      // fetch buttons and the search form depend on it
 }
 
 function openExtDialog() {
@@ -90,33 +161,110 @@ function openExtDialog() {
   $("ext-dialog").showModal();
 }
 
+// ---------------------------------------------------------------- search form (AutoTempest's own make / model lists)
+const option = (value, text, depth = 0) => `<option value="${esc(value)}">${"   ".repeat(depth)}${esc(text)}</option>`;
+
+async function loadMakes() {
+  const sel = $("s-make");
+  if (!state.ext) {
+    sel.innerHTML = `<option value="">Needs the extension</option>`;
+    sel.disabled = true; state.makesLoaded = false;
+    return;
+  }
+  if (state.makesLoaded) return;
+  sel.disabled = true; sel.innerHTML = `<option value="">Loading makes…</option>`;
+  try {
+    const { popular, all } = await ext.call("makes", {}, 20000);
+    sel.innerHTML = `<option value="">Select a make</option>` +
+      `<optgroup label="Popular makes">${popular.map(([v, t]) => option(v, t)).join("")}</optgroup>` +
+      `<optgroup label="All makes">${all.map(([v, t]) => option(v, t)).join("")}</optgroup>`;
+    sel.disabled = false; state.makesLoaded = true;
+  } catch (e) {
+    sel.innerHTML = `<option value="">Couldn't load makes, reload to retry</option>`;
+  }
+}
+
+async function loadModels() {
+  const make = $("s-make").value, sel = $("s-model");
+  sel.disabled = true;
+  if (!make) { sel.innerHTML = `<option value="">Pick a make</option>`; return; }
+  sel.innerHTML = `<option value="">Loading models…</option>`;
+  try {
+    const { popular, all } = await ext.call("models", { make }, 20000);
+    if ($("s-make").value !== make) return;                       // changed again meanwhile
+    const opts = (list) => list.map(([v, t, level]) => option(v, t, Math.min(level, 2))).join("");
+    sel.innerHTML = `<option value="">Any model</option>` +
+      (popular.length ? `<optgroup label="Popular models">${opts(popular)}</optgroup>` : "") +
+      `<optgroup label="All models">${opts(all)}</optgroup>`;
+  } catch {
+    sel.innerHTML = `<option value="">Any model (list unavailable)</option>`;
+  }
+  sel.disabled = false;
+}
+
+function setSearchStatus(text, kind = "") {
+  const el = $("s-status");
+  el.textContent = text;
+  el.className = "search-status" + (kind ? " is-" + kind : "");
+}
+
 async function runSearch(e) {
   e.preventDefault();
   if (!state.ext) { await pollExt(); if (!state.ext) return openExtDialog(); }
-  const go = $("s-go"), status = $("s-status");
-  go.disabled = true; status.textContent = "Starting…";
+  const go = $("s-go");
+  const params = {
+    share: true,
+    make: $("s-make").value, model: $("s-model").value, trim: $("s-trim").value.trim(),
+    zip: $("s-zip").value.trim(), radius: $("s-radius").value,
+    minyear: num("s-minyear"), maxyear: num("s-maxyear"), maxprice: num("s-maxprice"),
+  };
+  go.disabled = true; setSearchStatus("Starting…");
   try {
-    const { listings: found, upload } = await ext.runJob("search", { params: {
-      share: true,
-      make: $("s-make").value.trim(), model: $("s-model").value.trim(), zip: $("s-zip").value.trim(), radius: $("s-radius").value,
-      minyear: num("s-minyear"), maxyear: num("s-maxyear"), maxprice: num("s-maxprice"),
-    } }, (m) => { status.textContent = m; });
-    let msg = `Found ${found.length} listings.`;
+    const { listings: found, upload } = await ext.runJob("search", { params }, (m) => setSearchStatus(m));
     if (!upload || upload.error) {
-      msg += ` They could not be saved to the database, so they are not shown: ${(upload && upload.error) || "no answer"}. Try the search again.`;
-    } else {
-      msg += ` Database: ${upload.inserted} new, ${upload.updated} refreshed` + (upload.rejected
-        ? `, ${upload.rejected} not accepted (${Object.entries(upload.reasons).map(([k, v]) => `${k} x${v}`).join(", ")})` : "") + ".";
-      try { state.rows = await loadAll(); fillSelects(); render(); } catch (err) { msg += ` Reload the page to see them (${err.message}).`; }
+      setSearchStatus(`Found ${found.length} listings, but they could not be saved to the database, so they are not shown: ` +
+        `${(upload && upload.error) || "no answer"}. Try the search again.`, "bad");
+      return;
     }
-    status.textContent = msg;
+    let msg = `Found ${found.length} listings: ${upload.inserted} new, ${upload.updated} refreshed` + (upload.rejected
+      ? `, ${upload.rejected} not accepted (${Object.entries(upload.reasons).map(([k, v]) => `${k.replace(/_/g, " ")} ×${v}`).join(", ")})` : "") + ".";
+    try {
+      state.rows = await loadAll();
+      showSearchInFilters(params);
+    } catch (err) { msg += ` Reload the page to see them (${err.message}).`; }
+    setSearchStatus(msg, "ok");
   } catch (err) {
-    status.textContent = err.message;
+    setSearchStatus(err.message, "bad");
   } finally {
     go.disabled = false;
   }
 }
 
+// After a search, point the filters at what was searched so the new listings are what you see.
+async function showSearchInFilters(p) {
+  for (const el of document.querySelectorAll(".filters input, .filters select")) el.value = "";
+  const makeName = $("s-make").selectedOptions[0]?.textContent.trim();
+  const modelName = $("s-model").value ? $("s-model").selectedOptions[0]?.textContent.trim() : "";
+  fillSelects();
+  const dbMake = [...$("f-make").options].find((o) => o.value && same(o.value, makeName));
+  if (dbMake) {
+    $("f-make").value = dbMake.value; fillSelects();
+    const dbModel = modelName && [...$("f-model").options].find((o) => o.value && same(o.value, modelName));
+    if (dbModel) { $("f-model").value = dbModel.value; fillSelects(); }
+  }
+  if (/^\d{5}$/.test(p.zip)) {
+    $("f-zip").value = p.zip;
+    if ([...$("f-radius").options].some((o) => o.value === p.radius)) $("f-radius").value = p.radius;
+  }
+  if (p.minyear) $("f-year-min").value = p.minyear;
+  if (p.maxyear) $("f-year-max").value = p.maxyear;
+  if (p.maxprice) $("f-price-max").value = p.maxprice;
+  await updateNear();
+  if (state.near) $("f-sort").value = "distance";
+  filtersChanged();
+}
+
+// ---------------------------------------------------------------- fetch options (extension)
 async function fetchOptionsExt(r) {
   if (!state.ext) { await pollExt(); if (!state.ext) return openExtDialog(); }
   setJob(r.vin, "running", "Sending to the extension…");
@@ -150,7 +298,7 @@ async function fetchOptionsExt(r) {
   }
 }
 
-// ---------------------------------------------------------------- companion
+// ---------------------------------------------------------------- companion (BMW without the extension)
 async function companion(path, init = {}, timeoutMs = 2500) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
@@ -168,8 +316,8 @@ async function pollStatus() {
     state.companion = { ok: false, busy: false, blocked: 0 };
   }
   const pill = $("companion-pill"), c = state.companion;
-  pill.className = "pill " + (!c.ok ? "off" : c.busy ? "busy" : "ok");
-  $("companion-text").textContent = !c.ok ? "Companion not running" : c.blocked > 0 ? "Companion paused" : c.busy ? "Companion working…" : "Companion connected";
+  pill.className = "pill pill--quiet " + (!c.ok ? "off" : c.busy ? "busy" : "ok");
+  $("companion-text").textContent = !c.ok ? "Companion off" : c.blocked > 0 ? "Companion paused" : c.busy ? "Companion working…" : "Companion on";
 }
 
 function setJob(vin, st, message = "") {
@@ -227,7 +375,8 @@ function filtered() {
   const q = terms("f-search"), o = terms("f-options");
   const make = $("f-make").value, model = $("f-model").value, trim = $("f-trim").value;
   const yMin = num("f-year-min"), yMax = num("f-year-max"), pMax = num("f-price-max"), mMax = num("f-miles-max");
-  const has = $("f-has").value;
+  const has = $("f-has").value, near = state.near;
+  let unknownPlace = 0;
   const out = state.rows.filter((r) => {
     if (make && r.make !== make) return false;
     if (model && r.model !== model) return false;
@@ -246,6 +395,14 @@ function filtered() {
       const hay = (r.options || []).join(" | ").toLowerCase();
       if (!o.every((t) => hay.includes(t))) return false;
     }
+    if (near) {
+      const p = placeOf(r);
+      r._dist = p ? distanceMiles(near.origin, p) : null;
+      if (near.radius != null) {
+        if (r._dist == null) { unknownPlace++; return false; }
+        if (r._dist > near.radius) return false;
+      }
+    }
     return true;
   });
   const by = {
@@ -254,22 +411,38 @@ function filtered() {
     "price-desc": (a, b) => (b.price ?? -1) - (a.price ?? -1),
     "miles-asc": (a, b) => (a.mileage ?? Infinity) - (b.mileage ?? Infinity),
     "year-desc": (a, b) => (b.year ?? 0) - (a.year ?? 0),
-  }[$("f-sort").value];
-  return out.sort(by);
+    "distance": (a, b) => (a._dist ?? Infinity) - (b._dist ?? Infinity),
+  }[$("f-sort").value] || (() => 0);
+  return { rows: out.sort(by), unknownPlace };
 }
 
-function fillSelect(id, values) {
+// Model is only offered once a make is chosen, and trim once a model is chosen, each listing only what exists for it.
+function fillSelect(id, values, { label, placeholder, enabled, pretty = (v) => v }) {
   const sel = $(id), keep = sel.value;
-  const first = sel.options[0].outerHTML;
-  sel.innerHTML = first + [...new Set(values.filter(Boolean))].sort().map((v) => `<option>${esc(v)}</option>`).join("");
-  sel.value = [...sel.options].some((o) => o.value === keep) ? keep : "";
+  if (!enabled) { sel.innerHTML = `<option value="">${esc(placeholder)}</option>`; sel.disabled = true; return; }
+  const counts = new Map();
+  for (const v of values) if (v) counts.set(v, (counts.get(v) || 0) + 1);
+  sel.innerHTML = `<option value="">${esc(label)}</option>` + [...counts.keys()].sort((a, b) => pretty(a).localeCompare(pretty(b)))
+    .map((v) => `<option value="${esc(v)}">${esc(pretty(v))} (${counts.get(v)})</option>`).join("");
+  sel.disabled = false;
+  sel.value = counts.has(keep) ? keep : "";
 }
 
 function fillSelects() {
-  fillSelect("f-make", state.rows.map((r) => r.make));
-  fillSelect("f-model", state.rows.filter((r) => !$("f-make").value || r.make === $("f-make").value).map((r) => r.model));
-  fillSelect("f-trim", state.rows.filter((r) => (!$("f-make").value || r.make === $("f-make").value) &&
-    (!$("f-model").value || r.model === $("f-model").value)).map((r) => r.trim));
+  const make = $("f-make").value;
+  fillSelect("f-make", state.rows.map((r) => r.make), { label: "All makes", enabled: true, pretty: prettyMake });
+  const makeNow = $("f-make").value;
+  if (makeNow !== make) $("f-model").value = "";
+  fillSelect("f-model", state.rows.filter((r) => r.make === makeNow).map((r) => r.model),
+    { label: "All models", placeholder: "Select a make first", enabled: !!makeNow });
+  const modelNow = $("f-model").value;
+  fillSelect("f-trim", state.rows.filter((r) => r.make === makeNow && r.model === modelNow).map((r) => r.trim),
+    { label: "All trims", placeholder: "Select a model first", enabled: !!(makeNow && modelNow) });
+}
+
+function activeFilterCount() {
+  const ids = ["f-search", "f-options", "f-make", "f-model", "f-trim", "f-year-min", "f-year-max", "f-price-max", "f-miles-max", "f-has"];
+  return ids.filter((id) => $(id).value.trim() !== "").length + (state.near && state.near.radius != null ? 1 : 0);
 }
 
 // ---------------------------------------------------------------- rendering
@@ -288,25 +461,57 @@ function optionsBlock(r, ts) {
   return `<details class="opts" ${ts.length || state.pinned.has(r.vin) ? "open" : ""}><summary>${r.options.length} factory options</summary><ul>${items}</ul></details>`;
 }
 
+// A best guess at the paint from its name ("Black Sapphire Metallic", "Brooklyn Grau", "Bright White Clear-Coat"...).
+const SWATCHES = [
+  [/black|schwarz|noir|nero|carbon|obsidian|onyx|jet|ebony|sapphire/i, "#16181d"],
+  [/white|weiss|weiß|blanc|bianco|alpine|pearl|ivory|snow|frozen white|mineral white/i, "#f4f4f2"],
+  [/silver|silber|argent|platinum|aluminum|aluminium|titanium/i, "#c3c7cc"],
+  [/gr[ae]y|grau|gris|grigio|graphite|gunmetal|slate|charcoal|ash|cement|granite|anthracite/i, "#7d838c"],
+  [/blue|blau|bleu|blu|navy|marina|portimao|tanzanite|azure|cobalt|ocean|sky/i, "#2459a8"],
+  [/red|rot|rouge|rosso|crimson|ruby|garnet|scarlet|cherry|toronto|melbourne|aventurin/i, "#b22424"],
+  [/green|gr[uü]n|vert|verde|emerald|olive|isle of man|british racing|sage|forest/i, "#2f6b3a"],
+  [/yellow|gelb|jaune|giallo|austin|sao paulo|são paulo|lemon|sunflower/i, "#e7c11d"],
+  [/orange|fire|sunset|valencia|copper|kupfer|tangerine/i, "#dd6b20"],
+  [/brown|braun|brun|marrone|mocha|espresso|bronze|chestnut|cognac|tartufo|havana/i, "#6b4630"],
+  [/beige|tan|sand|cream|champagne|fawn|taupe|oyster|mojave/i, "#d2c2a0"],
+  [/gold|oro|dore/i, "#c9a227"],
+  [/purple|violet|lila|plum|amethyst|twilight/i, "#5b3d8f"],
+];
+function swatch(name) {
+  let best = null, at = Infinity;
+  for (const [re, color] of SWATCHES) {
+    const m = re.exec(name || "");
+    if (m && m.index < at) { at = m.index; best = color; }
+  }
+  return best ? `<span class="swatch" style="background:${best}"></span>` : `<span class="swatch swatch--unknown"></span>`;
+}
+
+function colorsBlock(r) {
+  const rows = [];
+  if (r.color) rows.push(`<div>${swatch(r.color)}<b>Exterior</b><span class="val" title="${esc(r.color)}">${esc(r.color)}</span></div>`);
+  if (r.interior) rows.push(`<div>${swatch(r.interior)}<b>Interior</b><span class="val" title="${esc(r.interior)}">${esc(r.interior)}</span></div>`);
+  return rows.length ? `<div class="colors">${rows.join("")}</div>` : "";
+}
+
 function actionArea(r) {
   const job = state.jobs[r.vin];
   const link = safeUrl(r.listing_url)
-    ? `<a class="btn" href="${esc(safeUrl(r.listing_url))}" target="_blank" rel="noopener noreferrer">View listing${r.source_site ? " on " + esc(r.source_site) : ""}</a>` : "";
+    ? `<a class="btn" href="${esc(safeUrl(r.listing_url))}" target="_blank" rel="noopener noreferrer">View listing</a>` : "";
   let fetchBit = "";
   const working = job && (job.state === "queued" || job.state === "running");
   const validVin = /^[A-HJ-NPR-Z0-9]{17}$/i.test(r.vin || "");
   if (!hasOptions(r) && isBmw(r) && state.ext && adapterOf(r) && adapterOf(r).ready) {
-    if (working) fetchBit = `<button class="btn primary" disabled>Fetching…</button>`;
-    else if (r.being_fetched) fetchBit = `<button class="btn" disabled>Being fetched by someone…</button>`;
-    else fetchBit = `<button class="btn primary" data-fetch-ext="${esc(r.vin)}">Fetch options</button>`;
+    if (working) fetchBit = `<button class="btn btn--primary" disabled>Fetching…</button>`;
+    else if (r.being_fetched) fetchBit = `<button class="btn" disabled>Being fetched…</button>`;
+    else fetchBit = `<button class="btn btn--primary" data-fetch-ext="${esc(r.vin)}">Fetch options</button>`;
   } else if (!hasOptions(r) && isBmw(r)) {
-    if (working) fetchBit = `<button class="btn primary" disabled>Fetching…</button>`;
-    else if (r.being_fetched) fetchBit = `<button class="btn" disabled>Being fetched by someone…</button>`;
-    else fetchBit = `<button class="btn primary" data-fetch="${esc(r.vin)}">Fetch options</button>`;
+    if (working) fetchBit = `<button class="btn btn--primary" disabled>Fetching…</button>`;
+    else if (r.being_fetched) fetchBit = `<button class="btn" disabled>Being fetched…</button>`;
+    else fetchBit = `<button class="btn btn--primary" data-fetch="${esc(r.vin)}">Fetch options</button>`;
   } else if (!hasOptions(r) && validVin && adapterOf(r)) {
-    if (working) fetchBit = `<button class="btn primary" disabled>Fetching…</button>`;
+    if (working) fetchBit = `<button class="btn btn--primary" disabled>Fetching…</button>`;
     else if (!adapterOf(r).ready) fetchBit = `<button class="btn" disabled title="No lookup site is set up for this make yet">Lookup not set up</button>`;
-    else fetchBit = `<button class="btn primary" data-fetch-ext="${esc(r.vin)}">Fetch options</button>`;
+    else fetchBit = `<button class="btn btn--primary" data-fetch-ext="${esc(r.vin)}">Fetch options</button>`;
   }
   let status = "";
   if (job && job.message) {
@@ -318,54 +523,79 @@ function actionArea(r) {
 
 function card(r, ts) {
   const img = safeUrl(r.image_url)
-    ? `<img class="thumb" loading="lazy" alt="" src="${esc(safeUrl(r.image_url))}" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">`
-    : `<div class="thumb"></div>`;
-  const meta = [r.year, r.mileage != null || r.mileage_text ? miles(r.mileage, r.mileage_text) : "", r.location].filter(Boolean)
-    .map((m) => `<span>${esc(m)}</span>`).join("");
-  return `<article class="card">${img}<div class="body">
-    <h2 class="title">${esc(r.title || [r.year, r.make, r.model, r.trim].filter(Boolean).join(" "))}</h2>
-    <div class="price">${esc(money(r.price, r.price_text))}</div>
-    <div class="meta">${meta}</div>
-    ${r.vin ? `<div class="vin">${esc(r.vin)}</div>` : ""}
-    ${hasOptions(r) ? optionsBlock(r, ts) : `<span class="badge">Options not fetched yet</span>`}
-    ${actionArea(r)}
-  </div></article>`;
+    ? `<img loading="lazy" alt="" src="${esc(safeUrl(r.image_url))}" referrerpolicy="no-referrer" onerror="this.remove()">` : "";
+  const dist = r._dist != null && state.near ? `<span class="chip-dist">${Math.round(r._dist).toLocaleString("en-US")} mi away</span>` : "";
+  const source = r.source_site ? `<span class="chip-source">${esc(r.source_site)}</span>` : "";
+  const place = String(r.location || "").split(" — ")[0];
+  const meta = [
+    r.mileage != null || r.mileage_text ? miles(r.mileage, r.mileage_text) : "",
+    place,
+    r.trim && !String(r.title || "").toLowerCase().includes(String(r.trim).toLowerCase()) ? r.trim : "",
+  ].filter(Boolean).map((m) => `<span title="${esc(m)}">${esc(m)}</span>`).join("");
+  return `<article class="card">
+    <div class="media">${img}${source}${dist}</div>
+    <div class="body">
+      <h2 class="title">${esc(r.title || [r.year, prettyMake(r.make), r.model, r.trim].filter(Boolean).join(" "))}</h2>
+      <div class="price">${esc(money(r.price, r.price_text))}</div>
+      <div class="meta">${meta}</div>
+      ${colorsBlock(r)}
+      ${r.vin ? `<div class="vin">${esc(r.vin)}</div>` : ""}
+      ${hasOptions(r) ? optionsBlock(r, ts) : `<span class="badge">Options not fetched yet</span>`}
+      ${actionArea(r)}
+    </div></article>`;
 }
 
 function render() {
-  const rows = filtered(), ts = terms("f-options");
-  $("count").textContent = `${rows.length.toLocaleString()} of ${state.rows.length.toLocaleString()} listings`;
-  $("grid").innerHTML = rows.map((r) => card(r, ts)).join("");
+  const { rows, unknownPlace } = filtered(), ts = terms("f-options");
+  const shown = rows.slice(0, state.shown);
+  $("count").innerHTML = `<strong>${rows.length.toLocaleString()}</strong> of ${state.rows.length.toLocaleString()} listings` +
+    (unknownPlace ? ` <span title="Their city couldn't be placed on the map">(${unknownPlace} with an unknown location hidden)</span>` : "");
+  $("grid").innerHTML = shown.map((r) => card(r, ts)).join("");
+  $("more-wrap").hidden = rows.length <= shown.length;
+  $("more").textContent = `Show more (${(rows.length - shown.length).toLocaleString()} left)`;
   $("empty").hidden = rows.length > 0 || state.rows.length === 0;
+  const n = activeFilterCount();
+  $("filter-count").hidden = !n; $("filter-count").textContent = n;
+}
+
+function filtersChanged() {
+  state.pinned.clear();          // a filter edit ends the "keep it visible" grace
+  state.shown = SHOW_STEP;
+  render();
 }
 
 // ---------------------------------------------------------------- start
 function wire() {
-  const changed = () => { state.pinned.clear(); render(); };   // a filter edit ends the "keep it visible" grace
-  for (const id of ["f-search", "f-options", "f-year-min", "f-year-max", "f-price-max", "f-miles-max"]) $(id).addEventListener("input", changed);
-  for (const id of ["f-has", "f-sort"]) $(id).addEventListener("change", changed);
-  for (const id of ["f-make", "f-model", "f-trim"]) $(id).addEventListener("change", () => { fillSelects(); changed(); });
-  $("f-reset").addEventListener("click", () => {
-    state.pinned.clear();
+  for (const id of ["f-search", "f-options", "f-year-min", "f-year-max", "f-price-max", "f-miles-max"]) $(id).addEventListener("input", filtersChanged);
+  for (const id of ["f-has", "f-sort"]) $(id).addEventListener("change", filtersChanged);
+  for (const id of ["f-make", "f-model", "f-trim"]) $(id).addEventListener("change", () => { fillSelects(); filtersChanged(); });
+  const nearChanged = async () => { await updateNear(); filtersChanged(); };
+  $("f-zip").addEventListener("input", () => { if (/^\d{5}$/.test($("f-zip").value.trim()) || !$("f-zip").value.trim()) nearChanged(); });
+  $("f-radius").addEventListener("change", nearChanged);
+  $("f-reset").addEventListener("click", async () => {
     for (const el of document.querySelectorAll(".filters input, .filters select")) el.value = "";
-    $("f-sort").value = "new"; fillSelects(); render();
+    $("f-sort").value = "new";
+    fillSelects(); await updateNear(); filtersChanged();
   });
+  $("more").addEventListener("click", () => { state.shown += SHOW_STEP; render(); });
   $("grid").addEventListener("click", (e) => {
     const b = e.target.closest("[data-fetch]");
     if (b) return fetchOptions(b.dataset.fetch);
     const x = e.target.closest("[data-fetch-ext]");
     if (x) { const r = state.rows.find((row) => row.vin === x.dataset.fetchExt); if (r) fetchOptionsExt(r); }
   });
+  $("s-make").addEventListener("change", loadModels);
   $("search-form").addEventListener("submit", runSearch);
   $("ext-pill").addEventListener("click", openExtDialog);
   $("companion-pill").addEventListener("click", openCompanionDialog);
+  if (matchMedia("(max-width: 960px)").matches) $("filters-panel").open = false;    // filters start folded on phones
 }
 
 async function main() {
   document.title = CONFIG.SITE_TITLE; $("site-title").textContent = CONFIG.SITE_TITLE;
   wire();
   pollStatus(); setInterval(pollStatus, 8000);
-  pollExt(); setInterval(pollExt, 15000);
+  pollExt().then(() => { if (!state.ext) loadMakes(); }); setInterval(pollExt, 15000);
   if (CONFIG.SUPABASE_URL.includes("YOUR-PROJECT")) {
     $("error").hidden = false; $("error").textContent = "Set SUPABASE_URL and SUPABASE_ANON_KEY in config.js.";
     return;

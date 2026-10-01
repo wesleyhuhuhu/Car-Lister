@@ -2,7 +2,7 @@
 // Requests only come from the page via bridge.js, and only for the fixed actions below.
 import { VIN_RE, adapterFor, describeAdapters } from "./adapters/index.js";
 import { decodeVins } from "./nhtsa.js";
-import { runSearch } from "./search.js";
+import { runSearch, getMakes, getModels } from "./search.js";
 import { TabClosed } from "./adapters/tabs.js";
 import { uploadListings, uploadOptions } from "./upload.js";
 
@@ -102,6 +102,9 @@ const handlers = {
     fetchJob(id, vin, make, listing, share !== false);
     return { jobId: id };
   },
+
+  makes: () => getMakes(),
+  models: ({ make }) => getModels(String(make || "")),
 
   job: ({ jobId }) => {
     const j = jobs.get(String(jobId));

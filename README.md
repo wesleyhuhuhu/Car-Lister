@@ -50,7 +50,30 @@ Saves after every VIN; stops after 3 failures in a row. BMW only for now (bimmer
 
 Rows saved before this change still hold old scraped options, which were unreliable. They stay until you look that VIN up.
 
+## 1b. Bring the database's listings into your local files
+
+```bash
+python db_pull.py --dry-run     # what would change
+python db_pull.py               # merge the shared database into listings.json / listings.csv
+```
+
+Adds every listing other people put in the database, refreshes the ones you have, takes the database's options where it has
+them, and keeps any local lookup that hasn't reached the database yet. Run it before `lookup_matching.py` so that works on everything.
+
 ## 2b. Look up every matching VIN (with rate-limit handling)
+
+`--model` picks a model with any trim, e.g. every 2022+ BMW iX:
+
+```bash
+python lookup_matching.py --model iX --dry-run
+python lookup_matching.py --model iX --limit 20
+```
+
+**Chrome profile.** Lookups use the automation profile at `%LOCALAPPDATA%\ChromeAutomation` (override with `CHROME_PROFILE`).
+It is emptied before every VIN (Chrome is closed, the folder's contents deleted, Chrome started again) so each lookup starts
+from the same clean state. `--keep-profile` (or `CHROME_FRESH_PROFILE=0`) keeps it between VINs. Only a folder named
+`ChromeAutomation`, `ChromeProfile` or `chrome-profile` is ever emptied. The delay between lookups and the pause after failures stay as they are.
+
 
 ```bash
 python lookup_matching.py --dry-run          # just list what would be looked up
@@ -201,6 +224,18 @@ npx supabase functions deploy submit-listings --no-verify-jwt
 ```
 
 Test the logic with `node supabase/functions/submit-listings/handler.test.mjs`.
+
+#### The listings page
+
+- **Search for all listings** uses AutoTempest's own make and model lists (popular first, then all), fetched through the extension, so
+  the names always match what AutoTempest expects. An optional trim keyword is sent as `trim_kw`. Only results inside the chosen
+  distance are kept: AutoTempest's "Results beyond N mi" section is skipped (in the extension and in `autotempest_scraper.py`).
+- **Filters:** Model is offered once a make is picked, and Trim once a model is picked, each listing only what exists for it.
+  **Near ZIP / Within** keeps listings within that distance and can sort by it. Distances come from `docs/geo.json`
+  (US Census ZIP and city coordinates; rebuild with `python tools/build_geo.py`). Listings whose city can't be placed are hidden
+  while a distance is set, and the count says how many.
+- **Color:** a car's exterior and interior color, from its looked-up build sheet, show on the card. They come from the
+  `color` / `interior` columns of `public_listings`; run `schema_shared.sql` again to add them. Until then the page simply doesn't show them.
 
 #### Whole-car check
 

@@ -51,17 +51,15 @@ def find_chrome() -> Path | None:
 def default_profile_dir() -> Path:
     """Where the automation browser keeps its own profile (cookies, cleared
     captchas). Chrome only allows remote debugging on a non-default profile, so
-    this is a separate folder, created automatically for whoever runs the tool.
-    Override with the CHROME_PROFILE environment variable."""
+    this is a separate folder, created automatically for whoever runs the tool:
+    %LOCALAPPDATA%/ChromeAutomation on Windows. Override with the CHROME_PROFILE
+    environment variable."""
     override = os.environ.get("CHROME_PROFILE")
     if override:
         return Path(override)
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:                                   # Windows
-        legacy = Path(local_app_data) / "ChromeAutomation"
-        if legacy.exists():                              # keep an earlier setup working
-            return legacy
-        return Path(local_app_data) / "CarLister" / "ChromeProfile"
+        return Path(local_app_data) / "ChromeAutomation"
     return Path.home() / ".car-lister" / "chrome-profile"
 
 
@@ -80,8 +78,15 @@ FALLBACK_DEFAULT = os.environ.get("OEM_FALLBACK", "1").strip().lower() not in ("
 # After bimmer.work blocks us, go straight to the fallback for this many minutes.
 BMW_RETRY_MINUTES = float(os.environ.get("BMW_RETRY_MINUTES", "10"))
 
+# Start every VIN with an empty automation profile (no cookies or cache left over from the previous VIN),
+# so each lookup runs the same way. --keep-profile or CHROME_FRESH_PROFILE=0 turns it off.
+FRESH_PROFILE_DEFAULT = os.environ.get("CHROME_FRESH_PROFILE", "1").strip().lower() not in ("0", "false", "no")
+# Only folders with these names are ever emptied, so a mistaken CHROME_PROFILE can't wipe anything else.
+WIPEABLE_PROFILE_NAMES = {"ChromeAutomation", "ChromeProfile", "chrome-profile"}
+
 _headless_override: bool | None = None
 _fallback_override: bool | None = None
+_fresh_override: bool | None = None
 
 
 class SiteBlocked(RuntimeError):
@@ -102,13 +107,16 @@ def add_browser_args(parser, default: bool | None = None) -> None:
                        + (" (default)" if default is False else ""))
     parser.add_argument("--no-fallback", dest="fallback", action="store_false", default=True,
                         help="Don't use oemnavigations.com when bimmer.work blocks the lookup")
+    parser.add_argument("--keep-profile", dest="fresh_profile", action="store_false", default=None,
+                        help="Keep the Chrome automation profile between VINs (default: empty it before every VIN)")
 
 
 def apply_browser_args(args) -> None:
     """Make every BmwSession() created afterwards follow the chosen options."""
-    global _headless_override, _fallback_override
+    global _headless_override, _fallback_override, _fresh_override
     _headless_override = getattr(args, "headless", None)
     _fallback_override = False if getattr(args, "fallback", True) is False else None
+    _fresh_override = getattr(args, "fresh_profile", None)
 
 
 # earlier names
@@ -246,6 +254,37 @@ def stop_profile_chrome() -> None:
     wait_for_chrome_gone(10)
 
 
+def wipe_profile() -> None:
+    """Empty the automation profile folder (the folder itself stays). Refuses any folder that isn't
+    one of this tool's own profiles. Chrome must be closed first; files Windows still has locked are
+    retried for a few seconds."""
+    profile = CHROME_PROFILE.resolve()
+    if profile.name not in WIPEABLE_PROFILE_NAMES or len(profile.parts) < 3:
+        raise RuntimeError(f"Refusing to empty {profile}: it is not a Car Lister automation profile "
+                           f"(expected a folder named one of {sorted(WIPEABLE_PROFILE_NAMES)}).")
+    if not profile.exists():
+        profile.mkdir(parents=True, exist_ok=True)
+        return
+    if _chrome_answering():
+        stop_profile_chrome()
+    leftover: list[Path] = []
+    for attempt in range(6):
+        leftover = []
+        for child in profile.iterdir():
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            except OSError:
+                leftover.append(child)
+        if not leftover:
+            return
+        time.sleep(1)
+    raise RuntimeError(f"Could not empty the Chrome profile {profile}; still in use: "
+                       f"{', '.join(p.name for p in leftover[:5])}. Close any Chrome using it and try again.")
+
+
 class BmwSession:
     """
     One Chrome window reused for any number of VIN lookups.
@@ -257,13 +296,18 @@ class BmwSession:
     Chrome that is still shutting down, so batches share a single session.
     """
 
-    def __init__(self, headless: bool | None = None, fallback: bool | None = None) -> None:
+    def __init__(self, headless: bool | None = None, fallback: bool | None = None,
+                 fresh_profile: bool | None = None) -> None:
         if headless is None:
             headless = _headless_override if _headless_override is not None else HEADLESS_DEFAULT
         self.headless = headless
         if fallback is None:
             fallback = _fallback_override if _fallback_override is not None else FALLBACK_DEFAULT
         self.fallback = fallback
+        if fresh_profile is None:
+            fresh_profile = _fresh_override if _fresh_override is not None else FRESH_PROFILE_DEFAULT
+        self.fresh_profile = fresh_profile
+        self._lookups_started = 0
         self._bimmer_skip_until = 0.0
         self.last_status: int | None = None
         self._chrome: subprocess.Popen | None = None
@@ -303,8 +347,19 @@ class BmwSession:
             raise
 
     def __enter__(self) -> "BmwSession":
+        if self.fresh_profile:
+            wipe_profile()
         self._launch()
         return self
+
+    def _restart_with_empty_profile(self) -> None:
+        """Close Chrome, empty the profile and start Chrome again (same window mode)."""
+        print(f"Emptying the Chrome profile {CHROME_PROFILE} for this VIN...")
+        self.close()
+        if not wait_for_chrome_gone(5):
+            stop_profile_chrome()
+        wipe_profile()
+        self._launch()
 
     def reopen(self, headless: bool) -> None:
         """Close Chrome and start it again with or without a visible window. The
@@ -385,6 +440,9 @@ class BmwSession:
     def lookup(self, vin: str):
         """Look a VIN up on bimmer.work; if that site blocks us, try oemnavigations.com
         (unless disabled). The returned build sheet says which site answered ("Source")."""
+        if self.fresh_profile and self._lookups_started:     # the first VIN already got an empty profile at start
+            self._restart_with_empty_profile()
+        self._lookups_started += 1
         blocked: SiteBlocked | None = None
         if not self.fallback or time.time() >= self._bimmer_skip_until:
             try:
