@@ -24,7 +24,7 @@ import re
 import urllib.parse
 from typing import Optional
 
-from playwright.sync_api import Error as PlaywrightError, sync_playwright
+from rebrowser_playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from models import Listing
 

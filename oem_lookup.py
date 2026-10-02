@@ -26,7 +26,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from rebrowser_playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 OEM_URL = os.environ.get("OEM_URL", "https://oemnavigations.com/pages/vin-decoder-app")
 OEM_DAILY_LIMIT = int(os.environ.get("OEM_DAILY_LIMIT", "2"))

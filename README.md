@@ -62,11 +62,13 @@ them, and keeps any local lookup that hasn't reached the database yet. Run it be
 
 ## 2b. Look up every matching VIN (with rate-limit handling)
 
-`--model` picks a model with any trim, e.g. every 2022+ BMW iX:
+`--make` and `--model` can be used alone or together (each takes one or more values), and any trim matches unless `--trim` is given. With none of them, the default is trim "M3 xDrive Competition". For example, every 2022+ BMW iX:
 
 ```bash
 python lookup_matching.py --model iX --dry-run
 python lookup_matching.py --model iX --limit 20
+python lookup_matching.py --make BMW --dry-run            # every BMW model
+python lookup_matching.py --make BMW --model iX i4 --dry-run
 ```
 
 **Chrome profile.** Lookups use the automation profile at `%LOCALAPPDATA%\ChromeAutomation` (override with `CHROME_PROFILE`).
@@ -277,12 +279,11 @@ No environment variable needed:
 
 ## Fallback site: oemnavigations.com
 
-If bimmer.work blocks a lookup (HTTP 429, or no VIN box / Submit button), the lookup automatically tries https://oemnavigations.com/pages/vin-decoder-app in the same Chrome window. Nothing else changes: the result is stored in the same shape (`Options` codes like `248`, plus `Color`, `Upholstery`, `Start of Production`), and `build_sheet["Source"]` says which site answered.
+Each VIN is tried on bimmer.work up to 3 times, 60 seconds apart. If all 3 attempts fail (HTTP 429, no VIN box, an empty vehicle or options page, a timeout...), that same VIN is tried on https://oemnavigations.com/pages/vin-decoder-app in the same Chrome window. The next VIN starts on bimmer.work again. Change the numbers with `BMW_ATTEMPTS` and `BMW_RETRY_SECONDS`. Nothing else changes: the result is stored in the same shape (`Options` codes like `248`, plus `Color`, `Upholstery`, `Start of Production`), and `build_sheet["Source"]` says which site answered.
 
 - The site allows **2 free checks per day**. This tool records the attempts in `~/.car-lister/oem_usage.json` (UTC day) as a log only; it never blocks a lookup. The site enforces the limit itself, and when it refuses, its message is shown and the lookup fails.
 - The **second check of the day shows a Cloudflare human check**. It is never bypassed: if Chrome is hidden, it is closed and reopened with a visible window so you can tick the box (you get 2 minutes), then hidden again. The lookup is repeated after reopening; the check appears before the VIN is accepted, so it doesn't cost an extra free check.
-- After bimmer.work blocks, it is skipped for 10 minutes (`BMW_RETRY_MINUTES`) so each VIN doesn't wait on it first.
-- A VIN that bimmer.work simply doesn't know, or a timeout after submitting, does **not** trigger the fallback (it would waste one of the 2 checks).
+- Any 3 failed attempts lead to the fallback, including a VIN bimmer.work simply doesn't know, so such a VIN can use up one of the 2 daily checks. A VIN costs at least 2 minutes of waiting before the fallback.
 - Turn it off with `--no-fallback` (all lookup scripts) or `OEM_FALLBACK=0`.
 - This site lists options with a leading zero (`0248`, `01CB`); they are converted to bimmer.work's style (`248`, `1CB`). Option wording differs slightly between the sites.
 

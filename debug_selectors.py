@@ -8,7 +8,7 @@ editor) and search for a chunk of text you recognize from a listing (a
 price like "$21,995" or a dealer name) to see what tags/classes wrap it.
 Share that snippet back and I'll fix the selectors in autotempest_scraper.py.
 """
-from playwright.sync_api import sync_playwright
+from rebrowser_playwright.sync_api import sync_playwright
 from autotempest_scraper import build_search_url
 
 def main():

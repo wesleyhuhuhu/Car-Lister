@@ -13,7 +13,7 @@ yourself there; this script just waits (up to 2 minutes) for the vehicle page.
 """
 import sys
 
-from playwright.sync_api import sync_playwright
+from rebrowser_playwright.sync_api import sync_playwright
 
 from bmw_lookup import CDP_URL, start_chrome, wait_for_chrome
 from scrape_bmw_data import options_url_for

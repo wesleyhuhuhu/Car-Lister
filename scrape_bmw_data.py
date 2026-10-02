@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+from rebrowser_playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
 
 # ---------------------------------------------------------------------------
@@ -12,7 +12,7 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 # ---------------------------------------------------------------------------
 
 # How long to wait for bimmer.work to show the vehicle information.
-VEHICLE_WAIT_SECONDS = 50
+VEHICLE_WAIT_SECONDS = 60
 
 VEHICLE_FIELDS = (
     "Market",

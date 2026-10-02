@@ -8,7 +8,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+from rebrowser_playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 from scrape_bmw_data import scrape_bmw_build_sheet
 import oem_lookup
 
@@ -93,8 +93,10 @@ CHROME_EXTRA_ARGS = os.environ.get("CHROME_EXTRA_ARGS", "").split()   # e.g. --n
 
 # Fallback site used when bimmer.work blocks us (see oem_lookup.py). OEM_FALLBACK=0 turns it off.
 FALLBACK_DEFAULT = os.environ.get("OEM_FALLBACK", "1").strip().lower() not in ("0", "false", "no")
-# After bimmer.work blocks us, go straight to the fallback for this many minutes.
-BMW_RETRY_MINUTES = float(os.environ.get("BMW_RETRY_MINUTES", "10"))
+# Each VIN gets this many bimmer.work attempts, this many seconds apart, before the fallback site is tried
+# for that same VIN. The next VIN starts on bimmer.work again.
+BMW_ATTEMPTS = max(1, int(os.environ.get("BMW_ATTEMPTS", "3")))
+BMW_RETRY_SECONDS = float(os.environ.get("BMW_RETRY_SECONDS", "60"))
 
 # Start every VIN with an empty automation profile (no cookies or cache left over from the previous VIN),
 # so each lookup runs the same way. --keep-profile or CHROME_FRESH_PROFILE=0 turns it off.
@@ -357,7 +359,6 @@ class BmwSession:
             fresh_profile = _fresh_override if _fresh_override is not None else FRESH_PROFILE_DEFAULT
         self.fresh_profile = fresh_profile
         self._lookups_started = 0
-        self._bimmer_skip_until = 0.0
         self.last_status: int | None = None
         self._chrome: subprocess.Popen | None = None
         self._playwright = None
@@ -490,29 +491,34 @@ class BmwSession:
         return " ".join(parts)
 
     def lookup(self, vin: str):
-        """Look a VIN up on bimmer.work; if that site blocks us, try oemnavigations.com
-        (unless disabled). The returned build sheet says which site answered ("Source")."""
+        """Look a VIN up on bimmer.work, trying it up to BMW_ATTEMPTS times BMW_RETRY_SECONDS apart.
+        If every attempt fails (429, no form, an empty vehicle or options page, a timeout...), try
+        oemnavigations.com for this same VIN (unless disabled). The next VIN starts on bimmer.work again.
+        The returned build sheet says which site answered ("Source")."""
         if self.fresh_profile and self._lookups_started:     # the first VIN already got an empty profile at start
             self._restart_with_empty_profile()
         self._lookups_started += 1
-        blocked: SiteBlocked | None = None
-        if not self.fallback or time.time() >= self._bimmer_skip_until:
+
+        last: Exception | None = None
+        for attempt in range(1, BMW_ATTEMPTS + 1):
+            if attempt > 1:
+                print(f"  bimmer.work attempt {attempt - 1}/{BMW_ATTEMPTS} failed; trying again in {BMW_RETRY_SECONDS:g} s...")
+                time.sleep(BMW_RETRY_SECONDS)
             try:
                 sheet = self._lookup_bimmer(vin)
                 sheet.setdefault("Source", "bimmer.work")
                 return sheet
-            except SiteBlocked as exc:
-                if not self.fallback:
-                    raise
-                blocked = exc
-                self._bimmer_skip_until = time.time() + BMW_RETRY_MINUTES * 60
-                print("bimmer.work is blocking lookups; switching to the fallback site "
-                      f"(bimmer.work is skipped for {BMW_RETRY_MINUTES:g} minutes).")
+            except Exception as exc:             # KeyboardInterrupt is not an Exception, so Ctrl+C still stops
+                last = exc
+                print(f"  bimmer.work: {exc.__class__.__name__}: {str(exc)[:200]}")
+        if not self.fallback:
+            raise last
+        print(f"bimmer.work failed {BMW_ATTEMPTS} times for {vin}; trying the fallback site for this VIN.")
         try:
             return oem_lookup.lookup(self, vin)
         except oem_lookup.OemLimitReached as exc:
-            detail = f" First problem: {blocked}" if blocked else ""
-            raise SiteBlocked(f"bimmer.work is blocking lookups and the fallback is used up. {exc}.{detail}")
+            raise SiteBlocked(f"bimmer.work failed {BMW_ATTEMPTS} times and the fallback is used up. {exc}. "
+                              f"Last bimmer.work problem: {last}")
 
     def _lookup_bimmer(self, vin: str):
         page = self.page

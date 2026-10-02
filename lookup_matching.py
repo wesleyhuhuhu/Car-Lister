@@ -4,6 +4,8 @@ matches a filter. Defaults: model year 2022 or newer, trim "M3 xDrive Competitio
 
     python lookup_matching.py --dry-run          # just list what would be looked up
     python lookup_matching.py --model iX         # every 2022+ BMW iX, any trim
+    python lookup_matching.py --make BMW         # every 2022+ BMW, any model and trim
+    python lookup_matching.py --make BMW --model iX i4    # several models of one make
     python lookup_matching.py --model iX --trim "xDrive50"   # one trim of it
     python lookup_matching.py                    # look them up
     python lookup_matching.py --limit 5          # only the first 5 this run
@@ -28,6 +30,10 @@ from lookup_options import lookup_vins
 from vin_router import route_listing
 
 
+# Makes bimmer.work (and the oemnavigations.com fallback) can look up.
+SUPPORTED_MAKES = {"bmw", "mini", "rollsroyce"}
+
+
 def _norm(text) -> str:
     return " ".join(str(text or "").split()).lower()
 
@@ -42,13 +48,15 @@ def _year(row):
 def main():
     parser = argparse.ArgumentParser(description="Look up factory options for all saved listings matching a filter.")
     parser.add_argument("--min-year", type=int, default=2022, help="Only model years at or above this (default 2022)")
-    parser.add_argument("--make", default="BMW", help="Make to match (default BMW, the only one lookups support)")
-    parser.add_argument("--model", default=None,
-                         help='Model to match, ignoring case and spaces, e.g. "iX" or "M3". With --model, any trim matches '
-                              "unless --trim is given too")
+    parser.add_argument("--make", nargs="+", default=None,
+                         help="Make(s) to match, e.g. BMW or MINI (lookups support BMW, MINI and Rolls-Royce). "
+                              "Can be used alone, with --model, or both. Default: any of those")
+    parser.add_argument("--model", nargs="+", default=None,
+                         help='Model(s) to match, ignoring case and spaces, e.g. "iX" or "M3 iX". Can be used alone or with --make')
     parser.add_argument("--trim", default=None,
-                         help='Trim to match exactly, ignoring case and extra spaces. Default "M3 xDrive Competition" '
-                              'when no --model is given; pass --trim "" to match every trim')
+                         help='Trim to match exactly, ignoring case and extra spaces. With --make or --model any trim matches '
+                              'unless --trim is given; with neither, the default is "M3 xDrive Competition". '
+                              '--trim "" matches every trim')
     parser.add_argument("--out-prefix", default="listings")
     parser.add_argument("--no-db", action="store_true", help="Don't push results to the online database")
     parser.add_argument("--dry-run", action="store_true", help="List the matching VINs and exit; nothing is looked up")
@@ -71,27 +79,35 @@ def main():
         sys.exit(f"No saved listings found in {json_path}. Run main.py first.")
 
     if args.trim is None:
-        args.trim = "" if args.model else "M3 xDrive Competition"
+        args.trim = "" if (args.make or args.model) else "M3 xDrive Competition"
     squash = lambda t: _norm(t).replace(" ", "").replace("-", "")
+    makes = {squash(m) for m in args.make or []}
+    models = {squash(m) for m in args.model or []}
+
+    def make_of(r):
+        return squash(r.get("make") or route_listing(title=r.get("title"), vin=r["vin"])[0])
+
     matches = [r for r in rows
                if r.get("vin")
                and (_year(r) or 0) >= args.min_year
-               and (not args.trim or _norm(r.get("trim")) == _norm(args.trim))
-               and (not args.model or squash(r.get("model")) == squash(args.model))
-               and _norm(r.get("make") or route_listing(title=r.get("title"), vin=r["vin"])[0]) == _norm(args.make)
-               and route_listing(title=r.get("title"), vin=r["vin"])[0] == "BMW"]
+               and make_of(r) in SUPPORTED_MAKES
+               and (not makes or make_of(r) in makes)
+               and (not models or squash(r.get("model")) in models)
+               and (not args.trim or _norm(r.get("trim")) == _norm(args.trim))]
     pending = [(r["vin"].upper(), r) for r in matches if not r.get("build_sheet")]
 
-    what = ", ".join(x for x in (f"year >= {args.min_year}", f"make {args.make}",
-                                 f'model "{args.model}"' if args.model else "", f'trim "{args.trim}"' if args.trim else "any trim") if x)
+    what = ", ".join(x for x in (f"year >= {args.min_year}",
+                                 f"make {' / '.join(args.make)}" if args.make else "any BMW / MINI / Rolls-Royce",
+                                 f"model {' / '.join(args.model)}" if args.model else "any model",
+                                 f'trim "{args.trim}"' if args.trim else "any trim") if x)
     print(f"{len(matches)} listings match ({what}): "
           f"{len(matches) - len(pending)} already looked up, {len(pending)} to look up.")
 
     if not matches:
-        found = Counter(f'{r.get("model") or "(blank)"} / {r.get("trim") or "(blank)"}' for r in rows
-                        if (_year(r) or 0) >= args.min_year and _norm(r.get("make")) == _norm(args.make))
+        found = Counter(f'{r.get("make") or "?"} {r.get("model") or "(blank)"} / {r.get("trim") or "(blank)"}' for r in rows
+                        if r.get("vin") and (_year(r) or 0) >= args.min_year and make_of(r) in (makes or SUPPORTED_MAKES))
         if found:
-            print(f"{args.make} models / trims found for year >= {args.min_year}:")
+            print(f"Makes / models / trims on file for year >= {args.min_year}:")
             for name, count in found.most_common(15):
                 print(f"  {count:4d}  {name}")
         return
